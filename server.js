@@ -276,6 +276,7 @@ app.post("/garmin/activities", requireApiKey, async (req, res) => {
 // --------------------
 app.post("/garmin/activity-debug", requireApiKey, async (req, res) => {
   try {
+    return res.json({ ok: false, error: "HIT NEW HANDLER v2" });
     const username = getUsernameFromReq(req);
     const tokenJson = req.body?.tokenJson;
 

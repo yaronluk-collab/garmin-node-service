@@ -268,6 +268,50 @@ app.post("/garmin/activities", requireApiKey, async (req, res) => {
 });
 
 // --------------------
+// Garmin: ACTIVITY DEBUG (PRINT FULL OBJECT)
+// Body: { username/email, tokenJson, activityId }
+// --------------------
+app.post("/garmin/activity-debug", requireApiKey, async (req, res) => {
+  try {
+    const tokenJson = req.body?.tokenJson;
+    const username = getUsernameFromReq(req);
+    const activityId = req.body?.activityId;
+
+    if (!username) {
+      return res.status(400).json({ ok: false, error: "Missing username (or email)" });
+    }
+
+    if (!activityId) {
+      return res.status(400).json({ ok: false, error: "Missing activityId" });
+    }
+
+    if (!tokenJson?.oauth1 || !tokenJson?.oauth2) {
+      return res.status(400).json({ ok: false, error: "Missing tokenJson.oauth1/oauth2" });
+    }
+
+    const client = createGarminClientForTokenOnly(username);
+    await loadTokenIntoClient(client, tokenJson);
+
+    const activity = await client.getActivity(activityId);
+
+    // 👇 PRINT FULL OBJECT TO RENDER LOGS
+    console.log("FULL GARMIN ACTIVITY:");
+    console.log(JSON.stringify(activity, null, 2));
+
+    const refreshed = await client.exportToken();
+
+    return res.json({
+      ok: true,
+      activity,
+      tokenJson: refreshed
+    });
+
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: e?.message || String(e) });
+  }
+});
+
+// --------------------
 // Start server
 // --------------------
 const port = process.env.PORT || 3000;

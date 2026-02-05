@@ -63,6 +63,21 @@ async function loadTokenIntoClient(client, tokenJson) {
   await client.loadToken(tokenJson);
 }
 
+function parseActivityIdFromBody(body) {
+  const raw = body?.activityId ?? body?.activityID ?? body?.activity_id ?? body?.id ?? null;
+
+  const parsed =
+    typeof raw === "number" ? raw : Number(String(raw ?? "").trim());
+
+  const ok = Number.isFinite(parsed) && parsed > 0;
+  return {
+    ok,
+    activityId: ok ? parsed : null,
+    activityIdRaw: raw,
+    activityIdRawType: typeof raw,
+  };
+}
+
 // --------------------
 // Health + Debug routes
 // --------------------
@@ -135,6 +150,22 @@ app.get("/debug/garmin-exports", requireApiKey, (req, res) => {
 });
 
 // --------------------
+// Debug: ECHO activityId (proves what server receives)
+// Body: { activityId } (plus anything else)
+// --------------------
+app.post("/debug/activity-id", requireApiKey, (req, res) => {
+  const parsed = parseActivityIdFromBody(req.body);
+  return res.json({
+    ok: true,
+    receivedKeys: Object.keys(req.body || {}),
+    activityIdRaw: parsed.activityIdRaw,
+    activityIdRawType: parsed.activityIdRawType,
+    parsedActivityId: parsed.activityId,
+    parsedActivityIdType: parsed.activityId ? typeof parsed.activityId : null,
+  });
+});
+
+// --------------------
 // Garmin: CONNECT (login OR token-first)
 // --------------------
 app.post("/garmin/connect", requireApiKey, async (req, res) => {
@@ -143,7 +174,7 @@ app.post("/garmin/connect", requireApiKey, async (req, res) => {
     const username = getUsernameFromReq(req);
     const password = req.body?.password || "";
 
-    // ✅ Dry-run: no Garmin calls
+    // Dry-run: no Garmin calls
     if (dryRun === true) {
       return res.json({
         ok: true,
@@ -166,19 +197,18 @@ app.post("/garmin/connect", requireApiKey, async (req, res) => {
     }
     const client = createGarminClientForLogin(username, password);
 
-    // 1) TOKEN-FIRST (best practice)
+    // 1) TOKEN-FIRST
     if (tokenJson) {
       try {
         await loadTokenIntoClient(client, tokenJson);
 
-        // Validate token with 1 cheap Garmin call (recommended)
+        // Validate token with 1 cheap Garmin call
         await client.getUserProfile();
 
         // Always export latest token (may be refreshed/rotated)
         const refreshed = await client.exportToken();
         return res.json({ ok: true, tokenJson: refreshed });
       } catch (e) {
-        // token failed; fall back to password login (below), with cooldown protection
         console.log("Token path failed; will try password login. Reason:", e?.message || e);
       }
     }
@@ -193,16 +223,12 @@ app.post("/garmin/connect", requireApiKey, async (req, res) => {
     }
     markPasswordLoginAttempt(username);
 
-    await client.login(); // creds already in constructor
+    await client.login();
     const exported = await client.exportToken();
-
     return res.json({ ok: true, tokenJson: exported });
   } catch (err) {
     console.error("Garmin connect error:", err?.message || err);
-    return res.status(500).json({
-      ok: false,
-      error: err?.message || String(err),
-    });
+    return res.status(500).json({ ok: false, error: err?.message || String(err) });
   }
 });
 
@@ -222,7 +248,6 @@ app.post("/garmin/profile", requireApiKey, async (req, res) => {
       return res.status(400).json({ ok: false, error: "Missing tokenJson.oauth1/oauth2" });
     }
 
-    // Token-only client (dummy password; no login() call)
     const client = createGarminClientForTokenOnly(username);
     await loadTokenIntoClient(client, tokenJson);
 
@@ -268,56 +293,48 @@ app.post("/garmin/activities", requireApiKey, async (req, res) => {
 });
 
 // --------------------
+// Garmin: ACTIVITY DEBUG (PRINT FULL OBJECT)
+// Body: { username/email, tokenJson, activityId }
 // --------------------
-// --------------------
-const activityIdRaw =
-  req.body?.activityId ?? req.body?.activityID ?? req.body?.activity_id ?? req.body?.id;
+app.post("/garmin/activity-debug", requireApiKey, async (req, res) => {
+  try {
+    const tokenJson = req.body?.tokenJson;
+    const username = getUsernameFromReq(req);
 
-const receivedKeys = Object.keys(req.body || {});
-const receivedActivityIdRaw = activityIdRaw;
-const receivedType = typeof activityIdRaw;
+    const parsed = parseActivityIdFromBody(req.body);
+    const receivedKeys = Object.keys(req.body || {});
 
-// Parse to a number safely (Garmin expects numeric ID)
-const activityId =
-  typeof activityIdRaw === "number"
-    ? activityIdRaw
-    : Number(String(activityIdRaw ?? "").trim());
+    if (!username) {
+      return res.status(400).json({ ok: false, error: "Missing username (or email)" });
+    }
+    if (!tokenJson?.oauth1 || !tokenJson?.oauth2) {
+      return res.status(400).json({ ok: false, error: "Missing tokenJson.oauth1/oauth2" });
+    }
+    if (!parsed.ok) {
+      return res.status(400).json({
+        ok: false,
+        error: "Missing/invalid activityId",
+        receivedKeys,
+        receivedActivityIdRaw: parsed.activityIdRaw,
+        receivedType: parsed.activityIdRawType,
+      });
+    }
 
-if (!Number.isFinite(activityId) || activityId <= 0) {
-  return res.status(400).json({
-    ok: false,
-    error: "Missing/invalid activityId",
-    receivedKeys,
-    receivedActivityIdRaw,
-    receivedType,
-  });
-}
+    const client = createGarminClientForTokenOnly(username);
+    await loadTokenIntoClient(client, tokenJson);
 
-// --------------------
-// Debug: ECHO activityId (proves what server receives)
-// Body: { activityId } (plus anything else)
-// --------------------
-app.post("/debug/activity-id", requireApiKey, (req, res) => {
-  const activityIdRaw =
-    req.body?.activityId ??
-    req.body?.activityID ??
-    req.body?.activity_id ??
-    req.body?.id ??
-    null;
+    const activity = await client.getActivity(parsed.activityId);
 
-  const activityId =
-    typeof activityIdRaw === "number"
-      ? activityIdRaw
-      : Number(String(activityIdRaw ?? "").trim());
+    // Print full object to Render logs
+    console.log("FULL GARMIN ACTIVITY:");
+    console.log(JSON.stringify(activity, null, 2));
 
-  return res.json({
-    ok: true,
-    receivedKeys: Object.keys(req.body || {}),
-    activityIdRaw,
-    activityIdRawType: typeof activityIdRaw,
-    parsedActivityId: Number.isFinite(activityId) ? activityId : null,
-    parsedActivityIdType: Number.isFinite(activityId) ? typeof activityId : null,
-  });
+    const refreshed = await client.exportToken();
+
+    return res.json({ ok: true, activity, tokenJson: refreshed });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: e?.message || String(e) });
+  }
 });
 
 // --------------------

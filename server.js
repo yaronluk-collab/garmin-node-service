@@ -268,6 +268,7 @@ app.post("/garmin/activities", requireApiKey, async (req, res) => {
 });
 
 // --------------------
+// --------------------
 // Garmin: ACTIVITY DEBUG (PRINT FULL OBJECT)
 // Body: { username/email, tokenJson, activityId }
 // --------------------
@@ -275,43 +276,36 @@ app.post("/garmin/activity-debug", requireApiKey, async (req, res) => {
   try {
     const tokenJson = req.body?.tokenJson;
     const username = getUsernameFromReq(req);
+    const activityId = req.body?.activityId;
 
-    // Accept a few common spellings just in case
-    const rawActivityId =
-      req.body?.activityId ?? req.body?.activityID ?? req.body?.activity_id;
-
-    const activityId =
-      typeof rawActivityId === "string" ? rawActivityId.trim() : rawActivityId;
+    // 👇 DEBUG INFO
+    const receivedKeys = Object.keys(req.body || {});
+    const receivedActivityId = req.body?.activityId;
+    const receivedType = typeof req.body?.activityId;
 
     if (!username) {
       return res.status(400).json({ ok: false, error: "Missing username (or email)" });
     }
 
-    // IMPORTANT: don't use `if (!activityId)` because 0/NaN/"" behave differently.
-    if (activityId === undefined || activityId === null || activityId === "") {
+    if (!activityId) {
       return res.status(400).json({
         ok: false,
         error: "Missing activityId",
-        receivedKeys: req.body ? Object.keys(req.body) : null,
-        receivedActivityId: rawActivityId ?? null,
-        receivedType: typeof rawActivityId,
+        receivedKeys,
+        receivedActivityId,
+        receivedType
       });
     }
 
     if (!tokenJson?.oauth1 || !tokenJson?.oauth2) {
-      return res.status(400).json({
-        ok: false,
-        error: "Missing tokenJson.oauth1/oauth2",
-        receivedKeys: req.body ? Object.keys(req.body) : null,
-      });
+      return res.status(400).json({ ok: false, error: "Missing tokenJson.oauth1/oauth2" });
     }
 
     const client = createGarminClientForTokenOnly(username);
     await loadTokenIntoClient(client, tokenJson);
 
-    const activity = await client.getActivity(activityId);
+    const activity = await client.getActivity(Number(activityId));
 
-    // 👇 PRINT FULL OBJECT TO RENDER LOGS
     console.log("FULL GARMIN ACTIVITY:");
     console.log(JSON.stringify(activity, null, 2));
 
@@ -320,8 +314,9 @@ app.post("/garmin/activity-debug", requireApiKey, async (req, res) => {
     return res.json({
       ok: true,
       activity,
-      tokenJson: refreshed,
+      tokenJson: refreshed
     });
+
   } catch (e) {
     return res.status(500).json({ ok: false, error: e?.message || String(e) });
   }

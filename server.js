@@ -1,4 +1,5 @@
 import express from "express";
+
 import pkg from "@flow-js/garmin-connect";
 const { GarminConnect } = pkg;
 
@@ -14,6 +15,15 @@ function requireApiKey(req, res, next) {
   }
   next();
 }
+
+// ✅ Debug body endpoint (must be AFTER app/use and AFTER requireApiKey)
+app.post("/debug/body", requireApiKey, (req, res) => {
+  res.json({
+    contentType: req.headers["content-type"] || null,
+    body: req.body,
+    keys: req.body ? Object.keys(req.body) : null
+  });
+});
 
 app.get("/health", (req, res) => res.json({ ok: true }));
 

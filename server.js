@@ -124,70 +124,76 @@ app.get("/debug/garmin-exports", requireApiKey, (req, res) => {
 // Garmin connect (safe)
 // --------------------
 app.post("/garmin/connect", requireApiKey, async (req, res) => {
-  const debug = req.body?.debug === true;
-
   try {
     const { tokenJson, dryRun } = req.body || {};
-    const { username, password } = getCreds(req.body || {});
 
-    // Dry-run mode: verifies request shape without calling Garmin
+    // Accept either "username" or "email"
+    const username = req.body?.username || req.body?.email || "";
+    const password = req.body?.password || "";
+
+    // ✅ Dry-run: no Garmin calls
     if (dryRun === true) {
       return res.json({
         ok: true,
         dryRun: true,
         received: {
           hasUsername: Boolean(username),
-          hasEmail: Boolean(req.body?.email),
           hasPassword: Boolean(password),
           hasTokenJson: Boolean(tokenJson),
           contentType: req.headers["content-type"] || null,
         },
-        expected: {
-          bodyFields: ["username (or email)", "password", "tokenJson(optional)"],
-        },
       });
     }
 
-    // Constructor requires creds (per library)
+    // ✅ GarminConnect requires creds in constructor in your environment
     if (!username || !password) {
       return res.status(400).json({
         ok: false,
-        error: "Missing credentials. Send username+password (or email+password).",
+        error: "Missing credentials. Provide username (or email) and password.",
       });
     }
 
-    const client = createGarminClient({ username, password });
+    const client = new GarminConnect({ username, password });
 
-    let connected = false;
-
-    // 1) Try token first (to avoid password login / rate limits)
+    // ----------------------------
+    // 1) TOKEN-FIRST (best practice)
+    // ----------------------------
     if (tokenJson) {
-      try {
+      // ✅ Correct token loading:
+      // Your tokenJson has { oauth1: {...}, oauth2: {...} }
+      if (tokenJson.oauth1 && tokenJson.oauth2) {
+        await client.loadToken(tokenJson.oauth1, tokenJson.oauth2);
+      } else {
+        // fallback if token shape differs
         await client.loadToken(tokenJson);
-        connected = true;
-      } catch (e) {
-        // token invalid/expired; fall back to password login
-      }
-    }
-
-    // 2) If token didn't work, do ONE password login attempt with cooldown
-    if (!connected) {
-      const gate = canAttemptPasswordLogin(username);
-      if (!gate.ok) {
-        return res.status(429).json({
-          ok: false,
-          error: `Cooldown active. Wait ${Math.ceil(gate.waitMs / 1000)}s before trying password login again.`,
-        });
       }
 
-      markPasswordLoginAttempt(username);
+      // ✅ Validate token with 1 cheap Garmin call (recommended)
+      await client.getUserProfile();
 
-      // Since client already has creds, login() can be called with no args
-      await client.login();
-      connected = true;
+      // ✅ Always export latest token (may be refreshed/rotated)
+      const refreshed = await client.exportToken();
+
+      return res.json({ ok: true, tokenJson: refreshed });
     }
 
-    // 3) Export fresh token for storage in Base44
+    // ----------------------------
+    // 2) NO TOKEN: PASSWORD LOGIN (with cooldown)
+    // ----------------------------
+    const now = Date.now();
+    const last = lastPasswordLoginAttemptByUsername.get(username) || 0;
+    const waitMs = PASSWORD_LOGIN_COOLDOWN_MS - (now - last);
+
+    if (waitMs > 0) {
+      return res.status(429).json({
+        ok: false,
+        error: `Cooldown active. Wait ${Math.ceil(waitMs / 1000)}s before trying password login again.`,
+      });
+    }
+
+    lastPasswordLoginAttemptByUsername.set(username, now);
+
+    await client.login(); // creds already in constructor
     const exported = await client.exportToken();
 
     return res.json({ ok: true, tokenJson: exported });
@@ -196,7 +202,6 @@ app.post("/garmin/connect", requireApiKey, async (req, res) => {
     return res.status(500).json({
       ok: false,
       error: err?.message || String(err),
-      ...(debug ? { stack: err?.stack } : {}),
     });
   }
 });

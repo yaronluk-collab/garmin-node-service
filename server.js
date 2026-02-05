@@ -1,5 +1,6 @@
 import express from "express";
-import { GarminConnect } from "@flow-js/garmin-connect";
+import pkg from "@flow-js/garmin-connect";
+const { GarminConnect } = pkg;
 
 const app = express();
 app.use(express.json());

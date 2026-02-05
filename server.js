@@ -275,18 +275,35 @@ app.post("/garmin/activity-debug", requireApiKey, async (req, res) => {
   try {
     const tokenJson = req.body?.tokenJson;
     const username = getUsernameFromReq(req);
-    const activityId = req.body?.activityId;
+
+    // Accept a few common spellings just in case
+    const rawActivityId =
+      req.body?.activityId ?? req.body?.activityID ?? req.body?.activity_id;
+
+    const activityId =
+      typeof rawActivityId === "string" ? rawActivityId.trim() : rawActivityId;
 
     if (!username) {
       return res.status(400).json({ ok: false, error: "Missing username (or email)" });
     }
 
-    if (!activityId) {
-      return res.status(400).json({ ok: false, error: "Missing activityId" });
+    // IMPORTANT: don't use `if (!activityId)` because 0/NaN/"" behave differently.
+    if (activityId === undefined || activityId === null || activityId === "") {
+      return res.status(400).json({
+        ok: false,
+        error: "Missing activityId",
+        receivedKeys: req.body ? Object.keys(req.body) : null,
+        receivedActivityId: rawActivityId ?? null,
+        receivedType: typeof rawActivityId,
+      });
     }
 
     if (!tokenJson?.oauth1 || !tokenJson?.oauth2) {
-      return res.status(400).json({ ok: false, error: "Missing tokenJson.oauth1/oauth2" });
+      return res.status(400).json({
+        ok: false,
+        error: "Missing tokenJson.oauth1/oauth2",
+        receivedKeys: req.body ? Object.keys(req.body) : null,
+      });
     }
 
     const client = createGarminClientForTokenOnly(username);
@@ -303,9 +320,8 @@ app.post("/garmin/activity-debug", requireApiKey, async (req, res) => {
     return res.json({
       ok: true,
       activity,
-      tokenJson: refreshed
+      tokenJson: refreshed,
     });
-
   } catch (e) {
     return res.status(500).json({ ok: false, error: e?.message || String(e) });
   }

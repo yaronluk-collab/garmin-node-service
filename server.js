@@ -270,70 +270,54 @@ app.post("/garmin/activities", requireApiKey, async (req, res) => {
 // --------------------
 // --------------------
 // --------------------
-// Garmin: ACTIVITY DEBUG (PRINT FULL OBJECT)
-// Body: { username/email, tokenJson, activityId }
-// Also supports: query param ?activityId=...
+const activityIdRaw =
+  req.body?.activityId ?? req.body?.activityID ?? req.body?.activity_id ?? req.body?.id;
+
+const receivedKeys = Object.keys(req.body || {});
+const receivedActivityIdRaw = activityIdRaw;
+const receivedType = typeof activityIdRaw;
+
+// Parse to a number safely (Garmin expects numeric ID)
+const activityId =
+  typeof activityIdRaw === "number"
+    ? activityIdRaw
+    : Number(String(activityIdRaw ?? "").trim());
+
+if (!Number.isFinite(activityId) || activityId <= 0) {
+  return res.status(400).json({
+    ok: false,
+    error: "Missing/invalid activityId",
+    receivedKeys,
+    receivedActivityIdRaw,
+    receivedType,
+  });
+}
+
 // --------------------
-app.post("/garmin/activity-debug", requireApiKey, async (req, res) => {
-  try {
-    
-    const username = getUsernameFromReq(req);
-    const tokenJson = req.body?.tokenJson;
+// Debug: ECHO activityId (proves what server receives)
+// Body: { activityId } (plus anything else)
+// --------------------
+app.post("/debug/activity-id", requireApiKey, (req, res) => {
+  const activityIdRaw =
+    req.body?.activityId ??
+    req.body?.activityID ??
+    req.body?.activity_id ??
+    req.body?.id ??
+    null;
 
-    // Accept activityId from either JSON body OR query param
-    const activityIdRaw =
-      req.body?.activityId ?? req.query?.activityId ?? req.body?.activityID ?? req.body?.id;
+  const activityId =
+    typeof activityIdRaw === "number"
+      ? activityIdRaw
+      : Number(String(activityIdRaw ?? "").trim());
 
-    // Always echo what we actually got (so we stop going in circles)
-    const receivedKeys = Object.keys(req.body || {});
-    const received = {
-      contentType: req.headers["content-type"] || null,
-      receivedKeys,
-      usernamePresent: Boolean(username),
-      activityIdRaw,
-      activityIdType: typeof activityIdRaw,
-      hasTokenOauth1: Boolean(tokenJson?.oauth1),
-      hasTokenOauth2: Boolean(tokenJson?.oauth2),
-    };
-
-    if (!username) {
-      return res.status(400).json({ ok: false, error: "Missing username (or email)", received });
-    }
-
-    if (!tokenJson?.oauth1 || !tokenJson?.oauth2) {
-      return res
-        .status(400)
-        .json({ ok: false, error: "Missing tokenJson.oauth1/oauth2", received });
-    }
-
-    // Parse + validate activityId
-    const activityIdStr =
-      activityIdRaw === undefined || activityIdRaw === null ? "" : String(activityIdRaw).trim();
-    const activityIdNum = Number(activityIdStr);
-
-    if (!activityIdStr || !Number.isFinite(activityIdNum) || activityIdNum <= 0) {
-      return res.status(400).json({
-        ok: false,
-        error: "Missing/invalid activityId",
-        received,
-        parsed: { activityIdStr, activityIdNum },
-      });
-    }
-
-    const client = createGarminClientForTokenOnly(username);
-    await loadTokenIntoClient(client, tokenJson);
-
-    const activity = await client.getActivity(activityIdNum);
-
-    console.log("FULL GARMIN ACTIVITY:");
-    console.log(JSON.stringify(activity, null, 2));
-
-    const refreshed = await client.exportToken();
-
-    return res.json({ ok: true, received, activity, tokenJson: refreshed });
-  } catch (e) {
-    return res.status(500).json({ ok: false, error: e?.message || String(e) });
-  }
+  return res.json({
+    ok: true,
+    receivedKeys: Object.keys(req.body || {}),
+    activityIdRaw,
+    activityIdRawType: typeof activityIdRaw,
+    parsedActivityId: Number.isFinite(activityId) ? activityId : null,
+    parsedActivityIdType: Number.isFinite(activityId) ? typeof activityId : null,
+  });
 });
 
 // --------------------

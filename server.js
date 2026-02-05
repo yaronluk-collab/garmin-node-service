@@ -1,59 +1,71 @@
 import express from "express";
 import pkg from "@flow-js/garmin-connect";
-
 const { GarminConnect } = pkg;
 
 const app = express();
 app.use(express.json());
 
-/* ---------------------------------------------------
-   API KEY AUTH
---------------------------------------------------- */
-
+// --------------------
+// Auth (API key)
+// --------------------
 function requireApiKey(req, res, next) {
-  try {
-    const auth = req.headers.authorization || "";
-    const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
-
-    if (!process.env.API_KEY || token !== process.env.API_KEY) {
-      return res.status(401).json({ ok: false, error: "Unauthorized" });
-    }
-
-    next();
-  } catch (e) {
-    return res.status(500).json({ ok: false, error: "Auth middleware crashed" });
+  const auth = req.headers.authorization || "";
+  const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+  if (!process.env.API_KEY || token !== process.env.API_KEY) {
+    return res.status(401).json({ ok: false, error: "Unauthorized" });
   }
+  next();
 }
 
-/* ---------------------------------------------------
-   HEALTH
---------------------------------------------------- */
+// --------------------
+// Helpers
+// --------------------
+function getCreds(body) {
+  const username = body?.username || body?.email || ""; // accept email for backwards compat
+  const password = body?.password || "";
+  return { username, password };
+}
 
-app.get("/health", (req, res) => {
-  res.json({ ok: true });
-});
+// In-memory cooldown (resets on restart)
+const lastPasswordLoginAttemptByUsername = new Map();
+const PASSWORD_LOGIN_COOLDOWN_MS = 10 * 60 * 1000; // 10 min
 
-/* ---------------------------------------------------
-   DEBUG: AUTH HEADER CHECK
---------------------------------------------------- */
+function canAttemptPasswordLogin(username) {
+  const now = Date.now();
+  const last = lastPasswordLoginAttemptByUsername.get(username) || 0;
+  const waitMs = PASSWORD_LOGIN_COOLDOWN_MS - (now - last);
+  return { ok: waitMs <= 0, waitMs: Math.max(0, waitMs) };
+}
+
+function markPasswordLoginAttempt(username) {
+  lastPasswordLoginAttemptByUsername.set(username, Date.now());
+}
+
+// IMPORTANT: GarminConnect constructor requires credentials (username+password)
+function createGarminClient({ username, password }) {
+  if (!username || !password) {
+    throw new Error("Missing credentials (username/password required in constructor)");
+  }
+  return new GarminConnect({ username, password });
+}
+
+// --------------------
+// Health + Debug routes
+// --------------------
+app.get("/health", (req, res) => res.json({ ok: true }));
 
 app.get("/debug/auth", (req, res) => {
   const auth = req.headers.authorization || "";
   const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
-
   res.json({
     hasEnvApiKey: Boolean(process.env.API_KEY),
     envApiKeyLength: process.env.API_KEY?.length ?? 0,
     gotAuthHeader: Boolean(auth),
-    authPrefix: auth.slice(0, 7),
+    authPrefix: auth.slice(0, 7), // should be "Bearer "
     gotTokenLength: token.length,
     tokenFirst8: token.slice(0, 8),
   });
 });
-
-/* ---------------------------------------------------
-   DEBUG: BODY SHAPE
---------------------------------------------------- */
 
 app.post("/debug/body", requireApiKey, (req, res) => {
   res.json({
@@ -63,224 +75,134 @@ app.post("/debug/body", requireApiKey, (req, res) => {
   });
 });
 
-/* ---------------------------------------------------
-   DEBUG: ROUTE VERIFICATION
---------------------------------------------------- */
-
-app.get("/debug/route", (req, res) => {
+// Useful to verify what route Express thinks you hit
+app.all("/debug/route", (req, res) => {
   res.json({
     ok: true,
     method: req.method,
     path: req.path,
     originalUrl: req.originalUrl,
     contentType: req.headers["content-type"] || null,
-    hasBody: Boolean(req.body),
+    hasBody: Boolean(req.body && Object.keys(req.body).length),
     bodyKeys: req.body ? Object.keys(req.body) : [],
   });
 });
 
-/* ---------------------------------------------------
-   DEBUG: GARMIN EXPORT STRUCTURE
---------------------------------------------------- */
-
-app.get("/debug/garmin-exports", requireApiKey, (req, res) => {
-  try {
-    res.json({
-      ok: true,
-      typeofPkg: typeof pkg,
-      keys: Object.keys(pkg || {}),
-      hasGarminConnect: Boolean(pkg?.GarminConnect),
-      typeofGarminConnect: typeof pkg?.GarminConnect,
-      hasPrototype: Boolean(pkg?.GarminConnect?.prototype),
-    });
-  } catch (e) {
-    res.status(500).json({
-      ok: false,
-      error: e?.message || String(e),
-    });
-  }
-});
-
-/* ---------------------------------------------------
-   DEBUG: GARMIN METHODS (SAFE — NO INSTANCE)
---------------------------------------------------- */
-
+// Do NOT instantiate GarminConnect here (constructor needs creds).
 app.get("/debug/garmin-methods", requireApiKey, (req, res) => {
   try {
-    const GC = GarminConnect;
-
-    const typeofGC = typeof GC;
-    const hasPrototype = Boolean(GC && GC.prototype);
-
-    let methods = [];
-
-    if (hasPrototype) {
-      const proto = GC.prototype;
-
-      methods = Object.getOwnPropertyNames(proto).filter(
-        (k) => k !== "constructor" && typeof proto[k] === "function"
-      );
-    }
+    const proto = GarminConnect?.prototype;
+    const methods = proto
+      ? Object.getOwnPropertyNames(proto).filter(
+          (k) => k !== "constructor" && typeof proto[k] === "function"
+        )
+      : [];
 
     res.json({
       ok: true,
-      typeofGarminConnect: typeofGC,
-      hasPrototype,
+      typeofGarminConnect: typeof GarminConnect,
+      hasPrototype: Boolean(proto),
       methodsCount: methods.length,
       methods,
     });
-  } catch (e) {
-    res.status(500).json({
-      ok: false,
-      where: "/debug/garmin-methods",
-      error: e?.message || String(e),
-      stack: e?.stack || null,
-    });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err?.message || String(err) });
   }
 });
 
-/* ---------------------------------------------------
-   GARMIN CONNECT
---------------------------------------------------- */
+// Optional: show what the module exports look like
+app.get("/debug/garmin-exports", requireApiKey, (req, res) => {
+  res.json({
+    ok: true,
+    typeofPkg: typeof pkg,
+    keys: pkg ? Object.keys(pkg) : [],
+    mention: "GarminConnect should be one of the keys above.",
+  });
+});
 
-/*
-  Password login cooldown
-  Protects against Garmin account lockout
-*/
-
-const lastPasswordLoginAttemptByEmail = new Map();
-const PASSWORD_LOGIN_COOLDOWN_MS = 10 * 60 * 1000;
-
-/*
-  Helper: create Garmin client safely
-  Handles class OR factory export
-*/
-
-function createGarminClient() {
-  if (typeof GarminConnect === "function") {
-    try {
-      return new GarminConnect();
-    } catch {
-      return GarminConnect();
-    }
-  }
-
-  throw new Error("GarminConnect export is not callable");
-}
-
+// --------------------
+// Garmin connect (safe)
+// --------------------
 app.post("/garmin/connect", requireApiKey, async (req, res) => {
+  const debug = req.body?.debug === true;
+
   try {
-    const { email, password, tokenJson, dryRun } = req.body || {};
+    const { tokenJson, dryRun } = req.body || {};
+    const { username, password } = getCreds(req.body || {});
 
-    /* ---------- Dry Run ---------- */
-
+    // Dry-run mode: verifies request shape without calling Garmin
     if (dryRun === true) {
       return res.json({
         ok: true,
         dryRun: true,
         received: {
-          hasEmail: Boolean(email),
+          hasUsername: Boolean(username),
+          hasEmail: Boolean(req.body?.email),
           hasPassword: Boolean(password),
           hasTokenJson: Boolean(tokenJson),
           contentType: req.headers["content-type"] || null,
         },
+        expected: {
+          bodyFields: ["username (or email)", "password", "tokenJson(optional)"],
+        },
       });
     }
 
-    const client = createGarminClient();
+    // Constructor requires creds (per library)
+    if (!username || !password) {
+      return res.status(400).json({
+        ok: false,
+        error: "Missing credentials. Send username+password (or email+password).",
+      });
+    }
+
+    const client = createGarminClient({ username, password });
+
     let connected = false;
 
-    /* ---------- TOKEN LOGIN ---------- */
-
+    // 1) Try token first (to avoid password login / rate limits)
     if (tokenJson) {
       try {
-        if (typeof client.loadToken === "function") {
-          await client.loadToken(tokenJson);
-          connected = true;
-        }
+        await client.loadToken(tokenJson);
+        connected = true;
       } catch (e) {
-        console.log("Token login failed, will attempt password login");
+        // token invalid/expired; fall back to password login
       }
     }
 
-    /* ---------- PASSWORD LOGIN ---------- */
-
+    // 2) If token didn't work, do ONE password login attempt with cooldown
     if (!connected) {
-      if (!email || !password) {
-        return res.status(400).json({
-          ok: false,
-          error: "Missing credentials",
-        });
-      }
-
-      if (typeof client.login !== "function") {
-        throw new Error("Garmin client has no login() method");
-      }
-
-      const now = Date.now();
-      const last = lastPasswordLoginAttemptByEmail.get(email) || 0;
-      const waitMs = PASSWORD_LOGIN_COOLDOWN_MS - (now - last);
-
-      if (waitMs > 0) {
+      const gate = canAttemptPasswordLogin(username);
+      if (!gate.ok) {
         return res.status(429).json({
           ok: false,
-          error: `Cooldown active. Wait ${Math.ceil(waitMs / 1000)}s`,
+          error: `Cooldown active. Wait ${Math.ceil(gate.waitMs / 1000)}s before trying password login again.`,
         });
       }
 
-      lastPasswordLoginAttemptByEmail.set(email, now);
+      markPasswordLoginAttempt(username);
 
-      console.log("[Garmin] Password login attempt");
-
-      await client.login(email, password);
+      // Since client already has creds, login() can be called with no args
+      await client.login();
       connected = true;
-
-      console.log("[Garmin] Password login success");
     }
 
-    /* ---------- EXPORT TOKEN ---------- */
-
-    if (typeof client.exportToken !== "function") {
-      throw new Error("Garmin client missing exportToken()");
-    }
-
+    // 3) Export fresh token for storage in Base44
     const exported = await client.exportToken();
 
-    res.json({
-      ok: true,
-      tokenJson: exported,
-    });
+    return res.json({ ok: true, tokenJson: exported });
   } catch (err) {
-    console.error("Garmin connect error:", err);
-
-    res.status(500).json({
+    console.error("Garmin connect error:", err?.message || err);
+    return res.status(500).json({
       ok: false,
       error: err?.message || String(err),
-      stack: err?.stack || null,
+      ...(debug ? { stack: err?.stack } : {}),
     });
   }
 });
 
-/* ---------------------------------------------------
-   GLOBAL ERROR HANDLER
---------------------------------------------------- */
-
-app.use((err, req, res, next) => {
-  console.error("UNHANDLED ERROR:", err);
-
-  res.status(500).json({
-    ok: false,
-    error: err?.message || String(err),
-    stack: err?.stack || null,
-  });
-});
-
-/* ---------------------------------------------------
-   START SERVER
---------------------------------------------------- */
-
+// --------------------
+// Start server
+// --------------------
 const port = process.env.PORT || 3000;
-
-app.listen(port, () => {
-  console.log("Listening on", port);
-});
+app.listen(port, () => console.log("Listening on", port));

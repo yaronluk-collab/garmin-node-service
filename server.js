@@ -296,7 +296,7 @@ app.post("/garmin/activities", requireApiKey, async (req, res) => {
 // Garmin: ACTIVITY DEBUG (PRINT FULL OBJECT)
 // Body: { username/email, tokenJson, activityId }
 // --------------------
-app.post("/garmin/activity-debug", requireApiKey, async (req, res) => {
+app.post("/garmin/activity-debug1", requireApiKey, async (req, res) => {
   try {
     const tokenJson = req.body?.tokenJson;
     const username = getUsernameFromReq(req);

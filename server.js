@@ -49,5 +49,20 @@ app.post("/garmin/connect", requireApiKey, async (req, res) => {
   }
 });
 
+
+app.get("/debug/auth", (req, res) => {
+  const auth = req.headers.authorization || "";
+  const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+  res.json({
+    hasEnvApiKey: Boolean(process.env.API_KEY),
+    envApiKeyLength: process.env.API_KEY?.length ?? 0,
+    gotAuthHeader: Boolean(auth),
+    authPrefix: auth.slice(0, 7),          // should be "Bearer "
+    gotTokenLength: token.length,
+    tokenFirst8: token.slice(0, 8)
+  });
+});
+
+
 const port = process.env.PORT || 3000;
 app.listen(port, () => console.log("Listening on", port));

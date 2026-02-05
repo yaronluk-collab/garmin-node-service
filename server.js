@@ -20,10 +20,8 @@ function requireApiKey(req, res, next) {
 // --------------------
 // Helpers
 // --------------------
-function getCreds(body) {
-  const username = body?.username || body?.email || ""; // accept email for backwards compat
-  const password = body?.password || "";
-  return { username, password };
+function getUsernameFromReq(req) {
+  return req.body?.username || req.body?.email || ""; // accept email for backwards compat
 }
 
 // In-memory cooldown (resets on restart)
@@ -41,12 +39,28 @@ function markPasswordLoginAttempt(username) {
   lastPasswordLoginAttemptByUsername.set(username, Date.now());
 }
 
-// IMPORTANT: GarminConnect constructor requires credentials (username+password)
-function createGarminClient({ username, password }) {
+// IMPORTANT: In your environment this library requires username+password in constructor.
+// For token-only endpoints we pass a dummy non-empty password and NEVER call login().
+function createGarminClientForTokenOnly(username) {
+  if (!username) throw new Error("Missing username (or email)");
+  return new GarminConnect({ username, password: "__token_only__" });
+}
+
+function createGarminClientForLogin(username, password) {
   if (!username || !password) {
-    throw new Error("Missing credentials (username/password required in constructor)");
+    throw new Error("Missing credentials. Provide username (or email) and password.");
   }
   return new GarminConnect({ username, password });
+}
+
+async function loadTokenIntoClient(client, tokenJson) {
+  // tokenJson should be { oauth1: {...}, oauth2: {...} }
+  if (tokenJson?.oauth1 && tokenJson?.oauth2) {
+    await client.loadToken(tokenJson.oauth1, tokenJson.oauth2);
+    return;
+  }
+  // fallback if someone stored it differently
+  await client.loadToken(tokenJson);
 }
 
 // --------------------
@@ -121,14 +135,12 @@ app.get("/debug/garmin-exports", requireApiKey, (req, res) => {
 });
 
 // --------------------
-// Garmin connect (safe)
+// Garmin: CONNECT (login OR token-first)
 // --------------------
 app.post("/garmin/connect", requireApiKey, async (req, res) => {
   try {
     const { tokenJson, dryRun } = req.body || {};
-
-    // Accept either "username" or "email"
-    const username = req.body?.username || req.body?.email || "";
+    const username = getUsernameFromReq(req);
     const password = req.body?.password || "";
 
     // ✅ Dry-run: no Garmin calls
@@ -145,53 +157,41 @@ app.post("/garmin/connect", requireApiKey, async (req, res) => {
       });
     }
 
-    // ✅ GarminConnect requires creds in constructor in your environment
+    // Create client with real creds (connect route is allowed to login)
     if (!username || !password) {
       return res.status(400).json({
         ok: false,
         error: "Missing credentials. Provide username (or email) and password.",
       });
     }
+    const client = createGarminClientForLogin(username, password);
 
-    const client = new GarminConnect({ username, password });
-
-    // ----------------------------
     // 1) TOKEN-FIRST (best practice)
-    // ----------------------------
     if (tokenJson) {
-      // ✅ Correct token loading:
-      // Your tokenJson has { oauth1: {...}, oauth2: {...} }
-      if (tokenJson.oauth1 && tokenJson.oauth2) {
-        await client.loadToken(tokenJson.oauth1, tokenJson.oauth2);
-      } else {
-        // fallback if token shape differs
-        await client.loadToken(tokenJson);
+      try {
+        await loadTokenIntoClient(client, tokenJson);
+
+        // Validate token with 1 cheap Garmin call (recommended)
+        await client.getUserProfile();
+
+        // Always export latest token (may be refreshed/rotated)
+        const refreshed = await client.exportToken();
+        return res.json({ ok: true, tokenJson: refreshed });
+      } catch (e) {
+        // token failed; fall back to password login (below), with cooldown protection
+        console.log("Token path failed; will try password login. Reason:", e?.message || e);
       }
-
-      // ✅ Validate token with 1 cheap Garmin call (recommended)
-      await client.getUserProfile();
-
-      // ✅ Always export latest token (may be refreshed/rotated)
-      const refreshed = await client.exportToken();
-
-      return res.json({ ok: true, tokenJson: refreshed });
     }
 
-    // ----------------------------
-    // 2) NO TOKEN: PASSWORD LOGIN (with cooldown)
-    // ----------------------------
-    const now = Date.now();
-    const last = lastPasswordLoginAttemptByUsername.get(username) || 0;
-    const waitMs = PASSWORD_LOGIN_COOLDOWN_MS - (now - last);
-
-    if (waitMs > 0) {
+    // 2) PASSWORD LOGIN (with cooldown)
+    const gate = canAttemptPasswordLogin(username);
+    if (!gate.ok) {
       return res.status(429).json({
         ok: false,
-        error: `Cooldown active. Wait ${Math.ceil(waitMs / 1000)}s before trying password login again.`,
+        error: `Cooldown active. Wait ${Math.ceil(gate.waitMs / 1000)}s before trying password login again.`,
       });
     }
-
-    lastPasswordLoginAttemptByUsername.set(username, now);
+    markPasswordLoginAttempt(username);
 
     await client.login(); // creds already in constructor
     const exported = await client.exportToken();
@@ -206,23 +206,64 @@ app.post("/garmin/connect", requireApiKey, async (req, res) => {
   }
 });
 
+// --------------------
+// Garmin: PROFILE (TOKEN-ONLY)
+// Body: { username/email, tokenJson }
+// --------------------
 app.post("/garmin/profile", requireApiKey, async (req, res) => {
   try {
-    const { tokenJson } = req.body || {};
-    const username = req.body?.username || req.body?.email || "";
-    const password = req.body?.password || "";
-    if (!username || !password) return res.status(400).json({ ok:false, error:"Missing credentials" });
-    if (!tokenJson?.oauth1 || !tokenJson?.oauth2) return res.status(400).json({ ok:false, error:"Missing tokenJson.oauth1/oauth2" });
+    const tokenJson = req.body?.tokenJson;
+    const username = getUsernameFromReq(req);
 
-    const client = new GarminConnect({ username, password });
-    await client.loadToken(tokenJson.oauth1, tokenJson.oauth2);
+    if (!username) {
+      return res.status(400).json({ ok: false, error: "Missing username (or email)" });
+    }
+    if (!tokenJson?.oauth1 || !tokenJson?.oauth2) {
+      return res.status(400).json({ ok: false, error: "Missing tokenJson.oauth1/oauth2" });
+    }
+
+    // Token-only client (dummy password; no login() call)
+    const client = createGarminClientForTokenOnly(username);
+    await loadTokenIntoClient(client, tokenJson);
 
     const profile = await client.getUserProfile();
     const refreshed = await client.exportToken();
 
     return res.json({ ok: true, profile, tokenJson: refreshed });
   } catch (e) {
-    return res.status(500).json({ ok:false, error: e?.message || String(e) });
+    return res.status(500).json({ ok: false, error: e?.message || String(e) });
+  }
+});
+
+// --------------------
+// Garmin: ACTIVITIES (TOKEN-ONLY)
+// Body: { username/email, tokenJson, limit? }
+// --------------------
+app.post("/garmin/activities", requireApiKey, async (req, res) => {
+  try {
+    const tokenJson = req.body?.tokenJson;
+    const username = getUsernameFromReq(req);
+    const limitRaw = req.body?.limit;
+
+    if (!username) {
+      return res.status(400).json({ ok: false, error: "Missing username (or email)" });
+    }
+    if (!tokenJson?.oauth1 || !tokenJson?.oauth2) {
+      return res.status(400).json({ ok: false, error: "Missing tokenJson.oauth1/oauth2" });
+    }
+
+    const n0 = Number(limitRaw ?? 10);
+    const n = Number.isFinite(n0) ? Math.max(1, Math.min(n0, 50)) : 10;
+
+    const client = createGarminClientForTokenOnly(username);
+    await loadTokenIntoClient(client, tokenJson);
+
+    const activities = await client.getActivities(0, n);
+    const refreshed = await client.exportToken();
+
+    return res.json({ ok: true, activities, tokenJson: refreshed });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: e?.message || String(e) });
   }
 });
 

@@ -178,6 +178,16 @@ app.post("/garmin/connect", requireApiKey, async (req, res) => {
   }
 });
 
+app.get("/debug/garmin-methods", requireApiKey, (req, res) => {
+  const client = new GarminConnect();
+  const proto = Object.getPrototypeOf(client);
+  const methods = Object.getOwnPropertyNames(proto).filter(
+    (k) => k !== "constructor" && typeof client[k] === "function"
+  );
+  res.json({ methods });
+});
+
+
 // --------------------
 // Start server
 // --------------------

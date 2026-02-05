@@ -206,6 +206,26 @@ app.post("/garmin/connect", requireApiKey, async (req, res) => {
   }
 });
 
+app.post("/garmin/profile", requireApiKey, async (req, res) => {
+  try {
+    const { tokenJson } = req.body || {};
+    const username = req.body?.username || req.body?.email || "";
+    const password = req.body?.password || "";
+    if (!username || !password) return res.status(400).json({ ok:false, error:"Missing credentials" });
+    if (!tokenJson?.oauth1 || !tokenJson?.oauth2) return res.status(400).json({ ok:false, error:"Missing tokenJson.oauth1/oauth2" });
+
+    const client = new GarminConnect({ username, password });
+    await client.loadToken(tokenJson.oauth1, tokenJson.oauth2);
+
+    const profile = await client.getUserProfile();
+    const refreshed = await client.exportToken();
+
+    return res.json({ ok: true, profile, tokenJson: refreshed });
+  } catch (e) {
+    return res.status(500).json({ ok:false, error: e?.message || String(e) });
+  }
+});
+
 // --------------------
 // Start server
 // --------------------

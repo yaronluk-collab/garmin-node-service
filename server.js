@@ -340,5 +340,16 @@ app.post("/garmin/activity-debug1", requireApiKey, async (req, res) => {
 // --------------------
 // Start server
 // --------------------
-const port = process.env.PORT || 3000;
-app.listen(port, () => console.log("Listening on", port));
+// Export app and helpers for testing; only start listener when run directly
+export {
+  app,
+  parseActivityIdFromBody,
+  canAttemptPasswordLogin,
+  markPasswordLoginAttempt,
+  lastPasswordLoginAttemptByUsername,
+};
+
+if (process.argv[1] && import.meta.url.endsWith(process.argv[1].replace(/^.*[\\/]/, ""))) {
+  const port = process.env.PORT || 3000;
+  app.listen(port, () => console.log("Listening on", port));
+}

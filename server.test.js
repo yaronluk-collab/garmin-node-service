@@ -152,12 +152,16 @@ describe("GET /health", () => {
 });
 
 describe("GET /debug/auth", () => {
-  it("returns auth diagnostics without requiring API key", async () => {
+  it("requires API key", async () => {
+    const res = await request(app).get("/debug/auth");
+    expect(res.status).toBe(401);
+  });
+
+  it("returns auth diagnostics with valid API key", async () => {
     const res = await request(app)
       .get("/debug/auth")
-      .set("Authorization", "Bearer sometoken");
+      .set(auth());
     expect(res.status).toBe(200);
-    expect(res.body.gotAuthHeader).toBe(true);
     expect(res.body.hasEnvApiKey).toBe(true);
   });
 });
@@ -175,6 +179,22 @@ describe("POST /debug/body", () => {
       .send({ foo: 1 });
     expect(res.status).toBe(200);
     expect(res.body.body).toEqual({ foo: 1 });
+  });
+});
+
+describe("ALL /debug/route", () => {
+  it("requires API key", async () => {
+    const res = await request(app).get("/debug/route");
+    expect(res.status).toBe(401);
+  });
+
+  it("returns route info with valid API key", async () => {
+    const res = await request(app)
+      .get("/debug/route")
+      .set(auth());
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.path).toBe("/debug/route");
   });
 });
 
@@ -262,7 +282,6 @@ describe("POST /garmin/connect", () => {
 
   it("token-first path: falls back to password login on token failure", async () => {
     mockGetUserProfile.mockRejectedValueOnce(new Error("token expired"));
-    // Second time (after login) not called — login path doesn't call getUserProfile
 
     const res = await request(app)
       .post("/garmin/connect")
@@ -302,6 +321,25 @@ describe("POST /garmin/connect", () => {
       .send({ username: "u", password: "p" });
     expect(res.status).toBe(500);
     expect(res.body.ok).toBe(false);
+  });
+
+  it("password login: does NOT burn cooldown when login() throws", async () => {
+    mockLogin.mockRejectedValue(new Error("Garmin is down"));
+    await request(app)
+      .post("/garmin/connect")
+      .set(auth())
+      .send({ username: "retry-user", password: "p" });
+    // Cooldown should NOT be set — user can retry immediately
+    expect(canAttemptPasswordLogin("retry-user").ok).toBe(true);
+  });
+
+  it("password login: DOES burn cooldown on successful login", async () => {
+    await request(app)
+      .post("/garmin/connect")
+      .set(auth())
+      .send({ username: "success-user", password: "p" });
+    // Cooldown should be active after successful login
+    expect(canAttemptPasswordLogin("success-user").ok).toBe(false);
   });
 
   it("accepts email field as username", async () => {
@@ -364,14 +402,24 @@ describe("POST /garmin/profile", () => {
     expect(res.status).toBe(400);
   });
 
-  it("returns 500 when Garmin call fails", async () => {
-    mockGetUserProfile.mockRejectedValue(new Error("Garmin error"));
+  it("returns 401 when token is expired", async () => {
+    mockGetUserProfile.mockRejectedValue(new Error("Unauthorized - token expired"));
+    const res = await request(app)
+      .post("/garmin/profile")
+      .set(auth())
+      .send({ username: "u", tokenJson: FAKE_TOKEN });
+    expect(res.status).toBe(401);
+    expect(res.body.error).toMatch(/Re-authenticate/);
+  });
+
+  it("returns 500 for non-token Garmin errors", async () => {
+    mockGetUserProfile.mockRejectedValue(new Error("Network timeout"));
     const res = await request(app)
       .post("/garmin/profile")
       .set(auth())
       .send({ username: "u", tokenJson: FAKE_TOKEN });
     expect(res.status).toBe(500);
-    expect(res.body.ok).toBe(false);
+    expect(res.body.error).toBe("Garmin request failed");
   });
 });
 
@@ -380,7 +428,7 @@ describe("POST /garmin/profile", () => {
 // ============================================================
 
 describe("POST /garmin/activities", () => {
-  it("returns activities with default limit", async () => {
+  it("returns activities with default limit and offset", async () => {
     const res = await request(app)
       .post("/garmin/activities")
       .set(auth())
@@ -388,7 +436,7 @@ describe("POST /garmin/activities", () => {
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
     expect(res.body.activities).toHaveLength(2);
-    // Default limit=10, offset=0
+    // Default offset=0, limit=10
     expect(mockGetActivities).toHaveBeenCalledWith(0, 10);
   });
 
@@ -419,6 +467,24 @@ describe("POST /garmin/activities", () => {
     expect(mockGetActivities).toHaveBeenCalledWith(0, 1);
   });
 
+  it("respects custom offset", async () => {
+    const res = await request(app)
+      .post("/garmin/activities")
+      .set(auth())
+      .send({ username: "u", tokenJson: FAKE_TOKEN, offset: 20 });
+    expect(res.status).toBe(200);
+    expect(mockGetActivities).toHaveBeenCalledWith(20, 10);
+  });
+
+  it("clamps negative offset to 0", async () => {
+    const res = await request(app)
+      .post("/garmin/activities")
+      .set(auth())
+      .send({ username: "u", tokenJson: FAKE_TOKEN, offset: -5 });
+    expect(res.status).toBe(200);
+    expect(mockGetActivities).toHaveBeenCalledWith(0, 10);
+  });
+
   it("returns 400 when missing username", async () => {
     const res = await request(app)
       .post("/garmin/activities")
@@ -442,16 +508,26 @@ describe("POST /garmin/activities", () => {
       .send({ username: "u", tokenJson: FAKE_TOKEN });
     expect(res.body.tokenJson).toEqual(REFRESHED_TOKEN);
   });
+
+  it("returns 401 on token-related errors", async () => {
+    mockGetActivities.mockRejectedValue(new Error("403 Forbidden"));
+    const res = await request(app)
+      .post("/garmin/activities")
+      .set(auth())
+      .send({ username: "u", tokenJson: FAKE_TOKEN });
+    expect(res.status).toBe(401);
+    expect(res.body.error).toMatch(/Re-authenticate/);
+  });
 });
 
 // ============================================================
-// POST /garmin/activity-debug1 TESTS
+// POST /garmin/activity TESTS
 // ============================================================
 
-describe("POST /garmin/activity-debug1", () => {
+describe("POST /garmin/activity", () => {
   it("returns full activity by ID", async () => {
     const res = await request(app)
-      .post("/garmin/activity-debug1")
+      .post("/garmin/activity")
       .set(auth())
       .send({ username: "u", tokenJson: FAKE_TOKEN, activityId: 99 });
     expect(res.status).toBe(200);
@@ -462,7 +538,7 @@ describe("POST /garmin/activity-debug1", () => {
 
   it("returns 400 for missing activityId", async () => {
     const res = await request(app)
-      .post("/garmin/activity-debug1")
+      .post("/garmin/activity")
       .set(auth())
       .send({ username: "u", tokenJson: FAKE_TOKEN });
     expect(res.status).toBe(400);
@@ -471,7 +547,7 @@ describe("POST /garmin/activity-debug1", () => {
 
   it("returns 400 for invalid activityId", async () => {
     const res = await request(app)
-      .post("/garmin/activity-debug1")
+      .post("/garmin/activity")
       .set(auth())
       .send({ username: "u", tokenJson: FAKE_TOKEN, activityId: "abc" });
     expect(res.status).toBe(400);
@@ -479,7 +555,7 @@ describe("POST /garmin/activity-debug1", () => {
 
   it("returns 400 when missing username", async () => {
     const res = await request(app)
-      .post("/garmin/activity-debug1")
+      .post("/garmin/activity")
       .set(auth())
       .send({ tokenJson: FAKE_TOKEN, activityId: 1 });
     expect(res.status).toBe(400);
@@ -487,7 +563,7 @@ describe("POST /garmin/activity-debug1", () => {
 
   it("returns 400 when missing tokenJson", async () => {
     const res = await request(app)
-      .post("/garmin/activity-debug1")
+      .post("/garmin/activity")
       .set(auth())
       .send({ username: "u", activityId: 1 });
     expect(res.status).toBe(400);
@@ -495,20 +571,30 @@ describe("POST /garmin/activity-debug1", () => {
 
   it("accepts string activityId", async () => {
     const res = await request(app)
-      .post("/garmin/activity-debug1")
+      .post("/garmin/activity")
       .set(auth())
       .send({ username: "u", tokenJson: FAKE_TOKEN, activityId: "99" });
     expect(res.status).toBe(200);
     expect(mockGetActivity).toHaveBeenCalledWith(99);
   });
 
-  it("returns 500 when Garmin call fails", async () => {
-    mockGetActivity.mockRejectedValue(new Error("Not found"));
+  it("returns 401 on token-related errors", async () => {
+    mockGetActivity.mockRejectedValue(new Error("Session expired"));
     const res = await request(app)
-      .post("/garmin/activity-debug1")
+      .post("/garmin/activity")
+      .set(auth())
+      .send({ username: "u", tokenJson: FAKE_TOKEN, activityId: 1 });
+    expect(res.status).toBe(401);
+    expect(res.body.error).toMatch(/Re-authenticate/);
+  });
+
+  it("returns 500 for non-token Garmin errors", async () => {
+    mockGetActivity.mockRejectedValue(new Error("Server error"));
+    const res = await request(app)
+      .post("/garmin/activity")
       .set(auth())
       .send({ username: "u", tokenJson: FAKE_TOKEN, activityId: 1 });
     expect(res.status).toBe(500);
-    expect(res.body.ok).toBe(false);
+    expect(res.body.error).toBe("Garmin request failed");
   });
 });

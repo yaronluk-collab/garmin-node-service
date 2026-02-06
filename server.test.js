@@ -533,7 +533,7 @@ describe("POST /garmin/activity", () => {
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
     expect(res.body.activity).toEqual({ activityId: 99, name: "Morning Run" });
-    expect(mockGetActivity).toHaveBeenCalledWith(99);
+    expect(mockGetActivity).toHaveBeenCalledWith({ activityId: 99 });
   });
 
   it("returns 400 for missing activityId", async () => {
@@ -575,7 +575,7 @@ describe("POST /garmin/activity", () => {
       .set(auth())
       .send({ username: "u", tokenJson: FAKE_TOKEN, activityId: "99" });
     expect(res.status).toBe(200);
-    expect(mockGetActivity).toHaveBeenCalledWith(99);
+    expect(mockGetActivity).toHaveBeenCalledWith({ activityId: 99 });
   });
 
   it("returns 401 on token-related errors", async () => {

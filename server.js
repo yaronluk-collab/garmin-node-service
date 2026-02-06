@@ -303,7 +303,7 @@ app.post("/garmin/activity", requireApiKey, (req, res) => {
     });
   }
   return withGarminToken(req, res, async (client) => ({
-    activity: await client.getActivity(parsed.activityId),
+    activity: await client.getActivity({ activityId: parsed.activityId }),
   }));
 });
 

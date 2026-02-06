@@ -63,6 +63,38 @@ async function loadTokenIntoClient(client, tokenJson) {
   await client.loadToken(tokenJson);
 }
 
+// Shared handler for token-only endpoints: validates inputs, creates client,
+// loads token, runs the action, and returns refreshed tokens.
+async function withGarminToken(req, res, actionFn) {
+  const tokenJson = req.body?.tokenJson;
+  const username = getUsernameFromReq(req);
+
+  if (!username) {
+    return res.status(400).json({ ok: false, error: "Missing username (or email)" });
+  }
+  if (!tokenJson?.oauth1 || !tokenJson?.oauth2) {
+    return res.status(400).json({ ok: false, error: "Missing tokenJson.oauth1/oauth2" });
+  }
+
+  try {
+    const client = createGarminClientForTokenOnly(username);
+    await loadTokenIntoClient(client, tokenJson);
+    const result = await actionFn(client, req);
+    const refreshed = await client.exportToken();
+    return res.json({ ok: true, ...result, tokenJson: refreshed });
+  } catch (e) {
+    const msg = e?.message || String(e);
+    const isTokenError = /token|unauthorized|auth|expired|session|403|401/i.test(msg);
+    if (isTokenError) {
+      return res.status(401).json({
+        ok: false,
+        error: "Token expired or invalid. Re-authenticate via /garmin/connect.",
+      });
+    }
+    return res.status(500).json({ ok: false, error: "Garmin request failed" });
+  }
+}
+
 function parseActivityIdFromBody(body) {
   const raw = body?.activityId ?? body?.activityID ?? body?.activity_id ?? body?.id ?? null;
 
@@ -83,7 +115,7 @@ function parseActivityIdFromBody(body) {
 // --------------------
 app.get("/health", (req, res) => res.json({ ok: true }));
 
-app.get("/debug/auth", (req, res) => {
+app.get("/debug/auth", requireApiKey, (req, res) => {
   const auth = req.headers.authorization || "";
   const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
   res.json({
@@ -105,7 +137,7 @@ app.post("/debug/body", requireApiKey, (req, res) => {
 });
 
 // Useful to verify what route Express thinks you hit
-app.all("/debug/route", (req, res) => {
+app.all("/debug/route", requireApiKey, (req, res) => {
   res.json({
     ok: true,
     method: req.method,
@@ -221,9 +253,8 @@ app.post("/garmin/connect", requireApiKey, async (req, res) => {
         error: `Cooldown active. Wait ${Math.ceil(gate.waitMs / 1000)}s before trying password login again.`,
       });
     }
-    markPasswordLoginAttempt(username);
-
     await client.login();
+    markPasswordLoginAttempt(username); // only burn cooldown on successful login
     const exported = await client.exportToken();
     return res.json({ ok: true, tokenJson: exported });
   } catch (err) {
@@ -236,109 +267,61 @@ app.post("/garmin/connect", requireApiKey, async (req, res) => {
 // Garmin: PROFILE (TOKEN-ONLY)
 // Body: { username/email, tokenJson }
 // --------------------
-app.post("/garmin/profile", requireApiKey, async (req, res) => {
-  try {
-    const tokenJson = req.body?.tokenJson;
-    const username = getUsernameFromReq(req);
-
-    if (!username) {
-      return res.status(400).json({ ok: false, error: "Missing username (or email)" });
-    }
-    if (!tokenJson?.oauth1 || !tokenJson?.oauth2) {
-      return res.status(400).json({ ok: false, error: "Missing tokenJson.oauth1/oauth2" });
-    }
-
-    const client = createGarminClientForTokenOnly(username);
-    await loadTokenIntoClient(client, tokenJson);
-
-    const profile = await client.getUserProfile();
-    const refreshed = await client.exportToken();
-
-    return res.json({ ok: true, profile, tokenJson: refreshed });
-  } catch (e) {
-    return res.status(500).json({ ok: false, error: e?.message || String(e) });
-  }
-});
+app.post("/garmin/profile", requireApiKey, (req, res) =>
+  withGarminToken(req, res, async (client) => ({
+    profile: await client.getUserProfile(),
+  }))
+);
 
 // --------------------
 // Garmin: ACTIVITIES (TOKEN-ONLY)
-// Body: { username/email, tokenJson, limit? }
+// Body: { username/email, tokenJson, offset?, limit? }
 // --------------------
-app.post("/garmin/activities", requireApiKey, async (req, res) => {
-  try {
-    const tokenJson = req.body?.tokenJson;
-    const username = getUsernameFromReq(req);
-    const limitRaw = req.body?.limit;
-
-    if (!username) {
-      return res.status(400).json({ ok: false, error: "Missing username (or email)" });
-    }
-    if (!tokenJson?.oauth1 || !tokenJson?.oauth2) {
-      return res.status(400).json({ ok: false, error: "Missing tokenJson.oauth1/oauth2" });
-    }
-
-    const n0 = Number(limitRaw ?? 10);
-    const n = Number.isFinite(n0) ? Math.max(1, Math.min(n0, 50)) : 10;
-
-    const client = createGarminClientForTokenOnly(username);
-    await loadTokenIntoClient(client, tokenJson);
-
-    const activities = await client.getActivities(0, n);
-    const refreshed = await client.exportToken();
-
-    return res.json({ ok: true, activities, tokenJson: refreshed });
-  } catch (e) {
-    return res.status(500).json({ ok: false, error: e?.message || String(e) });
-  }
-});
+app.post("/garmin/activities", requireApiKey, (req, res) =>
+  withGarminToken(req, res, async (client, req) => {
+    const n0 = Number(req.body?.limit ?? 10);
+    const limit = Number.isFinite(n0) ? Math.max(1, Math.min(n0, 50)) : 10;
+    const o0 = Number(req.body?.offset ?? 0);
+    const offset = Number.isFinite(o0) ? Math.max(0, o0) : 0;
+    return { activities: await client.getActivities(offset, limit) };
+  })
+);
 
 // --------------------
-// Garmin: ACTIVITY DEBUG (PRINT FULL OBJECT)
+// Garmin: SINGLE ACTIVITY
 // Body: { username/email, tokenJson, activityId }
 // --------------------
-app.post("/garmin/activity-debug1", requireApiKey, async (req, res) => {
-  try {
-    const tokenJson = req.body?.tokenJson;
-    const username = getUsernameFromReq(req);
-
-    const parsed = parseActivityIdFromBody(req.body);
-    const receivedKeys = Object.keys(req.body || {});
-
-    if (!username) {
-      return res.status(400).json({ ok: false, error: "Missing username (or email)" });
-    }
-    if (!tokenJson?.oauth1 || !tokenJson?.oauth2) {
-      return res.status(400).json({ ok: false, error: "Missing tokenJson.oauth1/oauth2" });
-    }
-    if (!parsed.ok) {
-      return res.status(400).json({
-        ok: false,
-        error: "Missing/invalid activityId",
-        receivedKeys,
-        receivedActivityIdRaw: parsed.activityIdRaw,
-        receivedType: parsed.activityIdRawType,
-      });
-    }
-
-    const client = createGarminClientForTokenOnly(username);
-    await loadTokenIntoClient(client, tokenJson);
-
-    const activity = await client.getActivity(parsed.activityId);
-
-    // Print full object to Render logs
-    console.log("FULL GARMIN ACTIVITY:");
-    console.log(JSON.stringify(activity, null, 2));
-
-    const refreshed = await client.exportToken();
-
-    return res.json({ ok: true, activity, tokenJson: refreshed });
-  } catch (e) {
-    return res.status(500).json({ ok: false, error: e?.message || String(e) });
+app.post("/garmin/activity", requireApiKey, (req, res) => {
+  const parsed = parseActivityIdFromBody(req.body);
+  if (!parsed.ok) {
+    return res.status(400).json({
+      ok: false,
+      error: "Missing/invalid activityId",
+      receivedKeys: Object.keys(req.body || {}),
+      receivedActivityIdRaw: parsed.activityIdRaw,
+      receivedType: parsed.activityIdRawType,
+    });
   }
+  return withGarminToken(req, res, async (client) => ({
+    activity: await client.getActivity(parsed.activityId),
+  }));
 });
 
 // --------------------
 // Start server
 // --------------------
-const port = process.env.PORT || 3000;
-app.listen(port, () => console.log("Listening on", port));
+// Export app and helpers for testing; only start listener when run directly
+export {
+  app,
+  parseActivityIdFromBody,
+  canAttemptPasswordLogin,
+  markPasswordLoginAttempt,
+  lastPasswordLoginAttemptByUsername,
+  withGarminToken,
+};
+
+if (process.argv[1] && import.meta.url.endsWith(process.argv[1].replace(/^.*[\\/]/, ""))) {
+  const port = process.env.PORT || 3000;
+  const server = app.listen(port, () => console.log("Listening on", port));
+  process.on("SIGTERM", () => server.close());
+}

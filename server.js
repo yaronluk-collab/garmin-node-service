@@ -349,6 +349,37 @@ app.post("/debug/activity-id", requireApiKey, (req, res) => {
 });
 
 // --------------------
+// Debug: Probe Garmin API for individual lap/split data
+// (temporary — remove after discovering the response structure)
+// --------------------
+app.post("/debug/garmin-splits", requireApiKey, (req, res) => {
+  const parsed = parseActivityIdFromBody(req.body);
+  if (!parsed.ok) {
+    return res.status(400).json({ ok: false, error: "Invalid activityId" });
+  }
+
+  return withGarminToken(req, res, async (client) => {
+    const id = parsed.activityId;
+    const base = "https://connectapi.garmin.com/activity-service/activity";
+    const urls = [
+      `${base}/${id}/splits`,
+      `${base}/${id}/details`,
+      `${base}/${id}/laps`,
+    ];
+    const results = {};
+    for (const url of urls) {
+      try {
+        const data = await client.get(url);
+        results[url] = { ok: true, data };
+      } catch (e) {
+        results[url] = { ok: false, error: e?.message || String(e) };
+      }
+    }
+    return { results };
+  });
+});
+
+// --------------------
 // Garmin: CONNECT (login OR token-first)
 // --------------------
 app.post("/garmin/connect", requireApiKey, async (req, res) => {

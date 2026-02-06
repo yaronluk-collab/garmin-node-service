@@ -42,6 +42,21 @@ const {
   SPLIT_COACHING_FIELDS,
   pickFields,
   flattenActivityDetail,
+  buildWorkoutResponse,
+  transformSplitSummaries,
+  SPLIT_TYPE_PHASE_MAP,
+  WORKOUT_IDENTITY_FIELDS,
+  WORKOUT_TIMING_FIELDS,
+  WORKOUT_DISTANCE_FIELDS,
+  WORKOUT_PACE_FIELDS,
+  WORKOUT_HR_FIELDS,
+  WORKOUT_ELEVATION_FIELDS,
+  WORKOUT_DYNAMICS_FIELDS,
+  WORKOUT_POWER_FIELDS,
+  WORKOUT_TRAINING_FIELDS,
+  WORKOUT_BODY_FIELDS,
+  WORKOUT_META_FIELDS,
+  WORKOUT_LAP_FIELDS,
 } = await import("./server.js");
 
 // ---------------------
@@ -1321,5 +1336,569 @@ describe("pickFields", () => {
     const obj = { activityType: { typeKey: "running" }, other: 1 };
     const result = pickFields(obj, ["activityType"]);
     expect(result).toEqual({ activityType: { typeKey: "running" } });
+  });
+});
+
+// ============================================================
+// transformSplitSummaries TESTS
+// ============================================================
+
+describe("transformSplitSummaries", () => {
+  it("maps all known split types to phase names", () => {
+    const types = [
+      ["INTERVAL_WARMUP", "warmup"],
+      ["INTERVAL_ACTIVE", "active"],
+      ["INTERVAL_RECOVERY", "recovery"],
+      ["INTERVAL_COOLDOWN", "cooldown"],
+      ["RWD_RUN", "run"],
+      ["RWD_WALK", "walk"],
+      ["RWD_STAND", "stand"],
+    ];
+    for (const [splitType, expectedPhase] of types) {
+      const result = transformSplitSummaries([{ splitType }]);
+      expect(result[0].phase).toBe(expectedPhase);
+      expect(result[0].splitType).toBe(splitType);
+    }
+  });
+
+  it("falls back to lowercase splitType for unknown types", () => {
+    const result = transformSplitSummaries([{ splitType: "FUTURE_TYPE" }]);
+    expect(result[0].phase).toBe("future_type");
+    expect(result[0].splitType).toBe("FUTURE_TYPE");
+  });
+
+  it("returns empty array for null/undefined input", () => {
+    expect(transformSplitSummaries(null)).toEqual([]);
+    expect(transformSplitSummaries(undefined)).toEqual([]);
+  });
+
+  it("returns empty array for empty input", () => {
+    expect(transformSplitSummaries([])).toEqual([]);
+  });
+
+  it("preserves all original fields alongside phase", () => {
+    const input = [{
+      splitType: "INTERVAL_ACTIVE",
+      noOfSplits: 3,
+      distance: 3000,
+      duration: 900,
+      averageHR: 165,
+      averageSpeed: 3.33,
+    }];
+    const result = transformSplitSummaries(input);
+    expect(result[0].phase).toBe("active");
+    expect(result[0].splitType).toBe("INTERVAL_ACTIVE");
+    expect(result[0].noOfSplits).toBe(3);
+    expect(result[0].distance).toBe(3000);
+    expect(result[0].duration).toBe(900);
+    expect(result[0].averageHR).toBe(165);
+    expect(result[0].averageSpeed).toBe(3.33);
+  });
+
+  it("handles missing splitType gracefully", () => {
+    const result = transformSplitSummaries([{ distance: 1000 }]);
+    expect(result[0].phase).toBe("unknown");
+  });
+});
+
+// ============================================================
+// buildWorkoutResponse TESTS
+// ============================================================
+
+describe("buildWorkoutResponse", () => {
+  const FLAT_ACTIVITY = {
+    activityId: 99,
+    activityName: "Morning Run",
+    activityType: { typeId: 1, typeKey: "running" },
+    startTimeLocal: "2026-02-05 07:15:00",
+    startTimeGMT: "2026-02-05 05:15:00",
+    locationName: "Tel Aviv",
+    startLatitude: 32.0853,
+    startLongitude: 34.7818,
+    endLatitude: 32.0901,
+    endLongitude: 34.7845,
+    duration: 2834.5,
+    movingDuration: 2790.1,
+    elapsedDuration: 2900.0,
+    distance: 8012.5,
+    steps: 8500,
+    averageSpeed: 2.83,
+    averageMovingSpeed: 2.87,
+    maxSpeed: 4.1,
+    avgGradeAdjustedSpeed: 2.95,
+    averageHR: 152,
+    maxHR: 178,
+    minHR: 90,
+    elevationGain: 45.0,
+    elevationLoss: 43.0,
+    maxElevation: 28.0,
+    minElevation: 2.0,
+    averageRunCadence: 172,
+    maxRunCadence: 184,
+    strideLength: 1.05,
+    groundContactTime: 245.0,
+    verticalOscillation: 8.5,
+    verticalRatio: 7.8,
+    averagePower: 280,
+    maxPower: 450,
+    minPower: 0,
+    normalizedPower: 290,
+    totalWork: 45.2,
+    trainingEffect: 3.2,
+    anaerobicTrainingEffect: 1.1,
+    aerobicTrainingEffectMessage: "IMPROVING_AEROBIC_BASE_8",
+    anaerobicTrainingEffectMessage: "MAINTAINING_ANAEROBIC_BASE_1",
+    trainingEffectLabel: "AEROBIC_BASE",
+    activityTrainingLoad: 125.5,
+    calories: 620,
+    avgRespirationRate: 28,
+    minRespirationRate: 18,
+    maxRespirationRate: 42,
+    moderateIntensityMinutes: 15,
+    vigorousIntensityMinutes: 25,
+    differenceBodyBattery: -12,
+    directWorkoutFeel: 50,
+    directWorkoutRpe: 40,
+    waterEstimated: 750,
+    beginPotentialStamina: 100,
+    endPotentialStamina: 55,
+    minAvailableStamina: 53,
+    lapCount: 5,
+    hasSplits: true,
+    manualActivity: false,
+    pr: false,
+    favorite: false,
+    // Fields that should be EXCLUDED from all groups
+    userProfileId: 12345,
+    activityUUID: "abc-123",
+    isMultiSportParent: false,
+    bmrCalories: 30,
+    manufacturer: "Garmin",
+    autoCalcCalories: false,
+    elevationCorrected: true,
+    maxVerticalSpeed: 0.5,
+    splitSummaries: [
+      { splitType: "INTERVAL_WARMUP", noOfSplits: 1, distance: 2000 },
+      { splitType: "INTERVAL_ACTIVE", noOfSplits: 5, distance: 5000 },
+      { splitType: "INTERVAL_RECOVERY", noOfSplits: 4, distance: 800 },
+      { splitType: "INTERVAL_COOLDOWN", noOfSplits: 1, distance: 1200 },
+    ],
+  };
+
+  const MOCK_LAPS = [
+    {
+      lapIndex: 1, distance: 1000, duration: 350, averageHR: 145,
+      averagePower: 300, strideLength: 105, groundContactTime: 260,
+      lengthDTOs: [], messageIndex: 0, bmrCalories: 5, minPower: 0,
+    },
+    {
+      lapIndex: 2, distance: 1000, duration: 340, averageHR: 155,
+      averagePower: 320, strideLength: 108, groundContactTime: 255,
+      lengthDTOs: [], messageIndex: 1, bmrCalories: 5, minPower: 0,
+    },
+  ];
+
+  it("groups fields into all 13 sections", () => {
+    const result = buildWorkoutResponse(FLAT_ACTIVITY, MOCK_LAPS);
+    const groups = Object.keys(result);
+    expect(groups).toEqual([
+      "identity", "timing", "distance", "pace", "heartRate",
+      "elevation", "runningDynamics", "power", "training",
+      "body", "workoutStructure", "laps", "meta",
+    ]);
+  });
+
+  it("populates identity correctly", () => {
+    const result = buildWorkoutResponse(FLAT_ACTIVITY, MOCK_LAPS);
+    expect(result.identity.activityId).toBe(99);
+    expect(result.identity.activityName).toBe("Morning Run");
+    expect(result.identity.activityType.typeKey).toBe("running");
+    expect(result.identity.startTimeLocal).toBe("2026-02-05 07:15:00");
+    expect(result.identity.locationName).toBe("Tel Aviv");
+    expect(result.identity.startLatitude).toBe(32.0853);
+    expect(result.identity.endLongitude).toBe(34.7845);
+  });
+
+  it("populates timing correctly", () => {
+    const result = buildWorkoutResponse(FLAT_ACTIVITY, MOCK_LAPS);
+    expect(result.timing.duration).toBe(2834.5);
+    expect(result.timing.movingDuration).toBe(2790.1);
+    expect(result.timing.elapsedDuration).toBe(2900.0);
+  });
+
+  it("populates distance correctly", () => {
+    const result = buildWorkoutResponse(FLAT_ACTIVITY, MOCK_LAPS);
+    expect(result.distance.distance).toBe(8012.5);
+    expect(result.distance.steps).toBe(8500);
+  });
+
+  it("populates pace correctly", () => {
+    const result = buildWorkoutResponse(FLAT_ACTIVITY, MOCK_LAPS);
+    expect(result.pace.averageSpeed).toBe(2.83);
+    expect(result.pace.maxSpeed).toBe(4.1);
+    expect(result.pace.avgGradeAdjustedSpeed).toBe(2.95);
+  });
+
+  it("populates heartRate correctly", () => {
+    const result = buildWorkoutResponse(FLAT_ACTIVITY, MOCK_LAPS);
+    expect(result.heartRate.averageHR).toBe(152);
+    expect(result.heartRate.maxHR).toBe(178);
+    expect(result.heartRate.minHR).toBe(90);
+  });
+
+  it("populates elevation correctly", () => {
+    const result = buildWorkoutResponse(FLAT_ACTIVITY, MOCK_LAPS);
+    expect(result.elevation.elevationGain).toBe(45.0);
+    expect(result.elevation.elevationLoss).toBe(43.0);
+    expect(result.elevation.maxElevation).toBe(28.0);
+    expect(result.elevation.minElevation).toBe(2.0);
+  });
+
+  it("populates runningDynamics correctly", () => {
+    const result = buildWorkoutResponse(FLAT_ACTIVITY, MOCK_LAPS);
+    expect(result.runningDynamics.averageRunCadence).toBe(172);
+    expect(result.runningDynamics.strideLength).toBe(1.05);
+    expect(result.runningDynamics.groundContactTime).toBe(245.0);
+    expect(result.runningDynamics.verticalOscillation).toBe(8.5);
+    expect(result.runningDynamics.verticalRatio).toBe(7.8);
+  });
+
+  it("populates power correctly", () => {
+    const result = buildWorkoutResponse(FLAT_ACTIVITY, MOCK_LAPS);
+    expect(result.power.averagePower).toBe(280);
+    expect(result.power.normalizedPower).toBe(290);
+    expect(result.power.totalWork).toBe(45.2);
+  });
+
+  it("populates training correctly", () => {
+    const result = buildWorkoutResponse(FLAT_ACTIVITY, MOCK_LAPS);
+    expect(result.training.trainingEffect).toBe(3.2);
+    expect(result.training.anaerobicTrainingEffect).toBe(1.1);
+    expect(result.training.trainingEffectLabel).toBe("AEROBIC_BASE");
+    expect(result.training.activityTrainingLoad).toBe(125.5);
+  });
+
+  it("populates body correctly", () => {
+    const result = buildWorkoutResponse(FLAT_ACTIVITY, MOCK_LAPS);
+    expect(result.body.calories).toBe(620);
+    expect(result.body.avgRespirationRate).toBe(28);
+    expect(result.body.differenceBodyBattery).toBe(-12);
+    expect(result.body.directWorkoutFeel).toBe(50);
+    expect(result.body.directWorkoutRpe).toBe(40);
+    expect(result.body.waterEstimated).toBe(750);
+    expect(result.body.beginPotentialStamina).toBe(100);
+    expect(result.body.endPotentialStamina).toBe(55);
+    expect(result.body.minAvailableStamina).toBe(53);
+  });
+
+  it("populates meta correctly", () => {
+    const result = buildWorkoutResponse(FLAT_ACTIVITY, MOCK_LAPS);
+    expect(result.meta.lapCount).toBe(5);
+    expect(result.meta.hasSplits).toBe(true);
+    expect(result.meta.pr).toBe(false);
+    expect(result.meta.favorite).toBe(false);
+  });
+
+  it("transforms splitSummaries into workoutStructure with phases", () => {
+    const result = buildWorkoutResponse(FLAT_ACTIVITY, MOCK_LAPS);
+    expect(result.workoutStructure).toHaveLength(4);
+    expect(result.workoutStructure[0]).toEqual({
+      phase: "warmup", splitType: "INTERVAL_WARMUP", noOfSplits: 1, distance: 2000,
+    });
+    expect(result.workoutStructure[1].phase).toBe("active");
+    expect(result.workoutStructure[2].phase).toBe("recovery");
+    expect(result.workoutStructure[3].phase).toBe("cooldown");
+  });
+
+  it("curates lap fields (drops noise like lengthDTOs, messageIndex, bmrCalories)", () => {
+    const result = buildWorkoutResponse(FLAT_ACTIVITY, MOCK_LAPS);
+    expect(result.laps).toHaveLength(2);
+    expect(result.laps[0].lapIndex).toBe(1);
+    expect(result.laps[0].distance).toBe(1000);
+    expect(result.laps[0].averagePower).toBe(300);
+    // Noise fields excluded
+    expect(result.laps[0].lengthDTOs).toBeUndefined();
+    expect(result.laps[0].messageIndex).toBeUndefined();
+    expect(result.laps[0].bmrCalories).toBeUndefined();
+    expect(result.laps[0].minPower).toBeUndefined();
+  });
+
+  it("excludes dropped activity fields from all groups", () => {
+    const result = buildWorkoutResponse(FLAT_ACTIVITY, MOCK_LAPS);
+    const allJson = JSON.stringify(result);
+    expect(allJson).not.toContain('"userProfileId"');
+    expect(allJson).not.toContain('"activityUUID"');
+    expect(allJson).not.toContain('"isMultiSportParent"');
+    expect(allJson).not.toContain('"bmrCalories"');
+    expect(allJson).not.toContain('"manufacturer"');
+    expect(allJson).not.toContain('"autoCalcCalories"');
+    expect(allJson).not.toContain('"elevationCorrected"');
+    expect(allJson).not.toContain('"maxVerticalSpeed"');
+  });
+
+  it("handles empty laps array", () => {
+    const result = buildWorkoutResponse(FLAT_ACTIVITY, []);
+    expect(result.laps).toEqual([]);
+  });
+
+  it("handles missing splitSummaries", () => {
+    const noSplits = { ...FLAT_ACTIVITY, splitSummaries: undefined };
+    const result = buildWorkoutResponse(noSplits, MOCK_LAPS);
+    expect(result.workoutStructure).toEqual([]);
+  });
+
+  it("returns empty objects for groups with no matching data", () => {
+    const minimal = { activityId: 1, duration: 100 };
+    const result = buildWorkoutResponse(minimal, []);
+    expect(result.identity.activityId).toBe(1);
+    expect(result.timing.duration).toBe(100);
+    expect(result.power).toEqual({});
+    expect(result.runningDynamics).toEqual({});
+    expect(result.training).toEqual({});
+    expect(result.body).toEqual({});
+  });
+});
+
+// ============================================================
+// POST /garmin/workout TESTS
+// ============================================================
+
+describe("POST /garmin/workout", () => {
+  beforeEach(() => {
+    mockGet.mockResolvedValue(FAKE_SPLITS_RESPONSE);
+  });
+
+  // --- Basic fetch ---
+
+  it("returns structured workout by activityId", async () => {
+    const res = await request(app)
+      .post("/garmin/workout")
+      .set(auth())
+      .send({ username: "u", tokenJson: FAKE_TOKEN, activityId: 99 });
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.activityId).toBe(99);
+    expect(res.body.workout).toBeDefined();
+    const groups = Object.keys(res.body.workout);
+    expect(groups).toContain("identity");
+    expect(groups).toContain("timing");
+    expect(groups).toContain("distance");
+    expect(groups).toContain("pace");
+    expect(groups).toContain("heartRate");
+    expect(groups).toContain("elevation");
+    expect(groups).toContain("runningDynamics");
+    expect(groups).toContain("power");
+    expect(groups).toContain("training");
+    expect(groups).toContain("body");
+    expect(groups).toContain("workoutStructure");
+    expect(groups).toContain("laps");
+    expect(groups).toContain("meta");
+  });
+
+  // --- Parallel fetch verification ---
+
+  it("calls both getActivity and splits API", async () => {
+    const res = await request(app)
+      .post("/garmin/workout")
+      .set(auth())
+      .send({ username: "u", tokenJson: FAKE_TOKEN, activityId: 99 });
+    expect(res.status).toBe(200);
+    expect(mockGetActivity).toHaveBeenCalledWith({ activityId: 99 });
+    expect(mockGet).toHaveBeenCalledWith(
+      "https://connectapi.garmin.com/activity-service/activity/99/splits"
+    );
+  });
+
+  it("does not call getActivities when activityId is provided", async () => {
+    await request(app)
+      .post("/garmin/workout")
+      .set(auth())
+      .send({ username: "u", tokenJson: FAKE_TOKEN, activityId: 99 });
+    expect(mockGetActivities).not.toHaveBeenCalled();
+  });
+
+  // --- Most recent activity ---
+
+  it("fetches most recent activity when activityId is omitted", async () => {
+    mockGetActivities.mockResolvedValue([{ activityId: 77 }]);
+    const res = await request(app)
+      .post("/garmin/workout")
+      .set(auth())
+      .send({ username: "u", tokenJson: FAKE_TOKEN });
+    expect(res.status).toBe(200);
+    expect(mockGetActivities).toHaveBeenCalledWith(0, 1);
+    expect(mockGetActivity).toHaveBeenCalledWith({ activityId: 77 });
+    expect(mockGet).toHaveBeenCalledWith(
+      "https://connectapi.garmin.com/activity-service/activity/77/splits"
+    );
+  });
+
+  it("returns 500 when user has no activities and activityId omitted", async () => {
+    mockGetActivities.mockResolvedValue([]);
+    const res = await request(app)
+      .post("/garmin/workout")
+      .set(auth())
+      .send({ username: "u", tokenJson: FAKE_TOKEN });
+    expect(res.status).toBe(500);
+  });
+
+  // --- Grouped data verification ---
+
+  it("includes flattened activity fields in correct groups", async () => {
+    const res = await request(app)
+      .post("/garmin/workout")
+      .set(auth())
+      .send({ username: "u", tokenJson: FAKE_TOKEN, activityId: 99 });
+    const w = res.body.workout;
+    expect(w.identity.activityName).toBe("Morning Run");
+    expect(w.identity.locationName).toBe("Tel Aviv");
+    expect(w.timing.duration).toBe(2834.5);
+    expect(w.distance.distance).toBe(8012.5);
+    expect(w.heartRate.averageHR).toBe(152);
+    expect(w.elevation.elevationGain).toBe(45.0);
+    expect(w.meta.lapCount).toBe(5);
+  });
+
+  it("includes laps from splits API", async () => {
+    const res = await request(app)
+      .post("/garmin/workout")
+      .set(auth())
+      .send({ username: "u", tokenJson: FAKE_TOKEN, activityId: 99 });
+    expect(res.body.workout.laps).toHaveLength(2);
+    expect(res.body.workout.laps[0].lapIndex).toBe(1);
+    expect(res.body.workout.laps[0].averagePower).toBe(344);
+  });
+
+  it("excludes noise fields from laps", async () => {
+    const res = await request(app)
+      .post("/garmin/workout")
+      .set(auth())
+      .send({ username: "u", tokenJson: FAKE_TOKEN, activityId: 99 });
+    const lap = res.body.workout.laps[0];
+    expect(lap.lengthDTOs).toBeUndefined();
+    expect(lap.connectIQMeasurement).toBeUndefined();
+    expect(lap.messageIndex).toBeUndefined();
+    expect(lap.bmrCalories).toBeUndefined();
+  });
+
+  it("transforms splitSummaries into workoutStructure", async () => {
+    const res = await request(app)
+      .post("/garmin/workout")
+      .set(auth())
+      .send({ username: "u", tokenJson: FAKE_TOKEN, activityId: 99 });
+    const ws = res.body.workout.workoutStructure;
+    expect(Array.isArray(ws)).toBe(true);
+    // The mock activity has one splitSummary entry
+    expect(ws.length).toBeGreaterThan(0);
+    expect(ws[0].splitType).toBeDefined();
+  });
+
+  it("excludes dropped activity fields", async () => {
+    const res = await request(app)
+      .post("/garmin/workout")
+      .set(auth())
+      .send({ username: "u", tokenJson: FAKE_TOKEN, activityId: 99 });
+    const allJson = JSON.stringify(res.body.workout);
+    expect(allJson).not.toContain('"userProfileId"');
+    expect(allJson).not.toContain('"isMultiSportParent"');
+  });
+
+  // --- Token refresh ---
+
+  it("returns refreshed tokens", async () => {
+    const res = await request(app)
+      .post("/garmin/workout")
+      .set(auth())
+      .send({ username: "u", tokenJson: FAKE_TOKEN, activityId: 99 });
+    expect(res.body.tokenJson).toEqual(REFRESHED_TOKEN);
+  });
+
+  // --- Validation ---
+
+  it("returns 400 for invalid activityId", async () => {
+    const res = await request(app)
+      .post("/garmin/workout")
+      .set(auth())
+      .send({ username: "u", tokenJson: FAKE_TOKEN, activityId: "abc" });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/activityId/i);
+  });
+
+  it("returns 400 when missing username", async () => {
+    const res = await request(app)
+      .post("/garmin/workout")
+      .set(auth())
+      .send({ tokenJson: FAKE_TOKEN, activityId: 1 });
+    expect(res.status).toBe(400);
+  });
+
+  it("returns 400 when missing tokenJson", async () => {
+    const res = await request(app)
+      .post("/garmin/workout")
+      .set(auth())
+      .send({ username: "u", activityId: 1 });
+    expect(res.status).toBe(400);
+  });
+
+  // --- Error handling ---
+
+  it("returns 401 on token-related errors from activity fetch", async () => {
+    mockGetActivity.mockRejectedValue(new Error("401 Unauthorized"));
+    const res = await request(app)
+      .post("/garmin/workout")
+      .set(auth())
+      .send({ username: "u", tokenJson: FAKE_TOKEN, activityId: 1 });
+    expect(res.status).toBe(401);
+    expect(res.body.error).toMatch(/Re-authenticate/);
+  });
+
+  it("returns 401 on token-related errors from splits fetch", async () => {
+    mockGet.mockRejectedValue(new Error("403 Forbidden"));
+    const res = await request(app)
+      .post("/garmin/workout")
+      .set(auth())
+      .send({ username: "u", tokenJson: FAKE_TOKEN, activityId: 1 });
+    expect(res.status).toBe(401);
+  });
+
+  it("returns 500 for non-token errors", async () => {
+    mockGetActivity.mockRejectedValue(new Error("Network timeout"));
+    const res = await request(app)
+      .post("/garmin/workout")
+      .set(auth())
+      .send({ username: "u", tokenJson: FAKE_TOKEN, activityId: 1 });
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBe("Garmin request failed");
+  });
+
+  // --- Edge cases ---
+
+  it("handles empty splits gracefully", async () => {
+    mockGet.mockResolvedValue({ activityId: 99, lapDTOs: [] });
+    const res = await request(app)
+      .post("/garmin/workout")
+      .set(auth())
+      .send({ username: "u", tokenJson: FAKE_TOKEN, activityId: 99 });
+    expect(res.status).toBe(200);
+    expect(res.body.workout.laps).toEqual([]);
+  });
+
+  it("handles missing lapDTOs gracefully", async () => {
+    mockGet.mockResolvedValue({ activityId: 99 });
+    const res = await request(app)
+      .post("/garmin/workout")
+      .set(auth())
+      .send({ username: "u", tokenJson: FAKE_TOKEN, activityId: 99 });
+    expect(res.status).toBe(200);
+    expect(res.body.workout.laps).toEqual([]);
+  });
+
+  // --- Auth ---
+
+  it("requires API key", async () => {
+    const res = await request(app)
+      .post("/garmin/workout")
+      .send({ username: "u", tokenJson: FAKE_TOKEN, activityId: 99 });
+    expect(res.status).toBe(401);
   });
 });

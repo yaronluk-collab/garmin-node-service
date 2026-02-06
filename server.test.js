@@ -582,6 +582,73 @@ describe("POST /garmin/activities", () => {
     expect(res.status).toBe(401);
     expect(res.body.error).toMatch(/Re-authenticate/);
   });
+
+  it("preserves all date/time fields from Garmin untouched", async () => {
+    const activitiesFromGarmin = [
+      {
+        activityId: 201,
+        activityName: "Road Cycling",
+        startTimeLocal: "2026-01-24 10:37:00",
+        startTimeGMT: "2026-01-24 08:37:00",
+        beginTimestamp: 1737711420000,
+        distance: 72880,
+      },
+      {
+        activityId: 202,
+        activityName: "Road Cycling",
+        startTimeLocal: "2026-01-17 07:00:00",
+        startTimeGMT: "2026-01-17 05:00:00",
+        beginTimestamp: 1737090000000,
+        distance: 88310,
+      },
+    ];
+    mockGetActivities.mockResolvedValue(activitiesFromGarmin);
+
+    const res = await request(app)
+      .post("/garmin/activities")
+      .set(auth())
+      .send({ username: "u", tokenJson: FAKE_TOKEN, limit: 20 });
+
+    expect(res.status).toBe(200);
+    const acts = res.body.activities;
+    expect(acts).toHaveLength(2);
+
+    // Dates must pass through byte-for-byte — no parsing, no timezone shift
+    expect(acts[0].startTimeLocal).toBe("2026-01-24 10:37:00");
+    expect(acts[0].startTimeGMT).toBe("2026-01-24 08:37:00");
+    expect(acts[0].beginTimestamp).toBe(1737711420000);
+
+    expect(acts[1].startTimeLocal).toBe("2026-01-17 07:00:00");
+    expect(acts[1].startTimeGMT).toBe("2026-01-17 05:00:00");
+    expect(acts[1].beginTimestamp).toBe(1737090000000);
+
+    // The two activities must NOT share the same date
+    expect(acts[0].startTimeLocal.slice(0, 10)).not.toBe(
+      acts[1].startTimeLocal.slice(0, 10)
+    );
+  });
+
+  it("preserves Garmin's activity ordering (most recent first)", async () => {
+    const activitiesFromGarmin = [
+      { activityId: 10, startTimeLocal: "2026-02-05 08:00:00", beginTimestamp: 1738742400000 },
+      { activityId: 9, startTimeLocal: "2026-02-04 07:00:00", beginTimestamp: 1738652400000 },
+      { activityId: 8, startTimeLocal: "2026-02-03 09:30:00", beginTimestamp: 1738573800000 },
+    ];
+    mockGetActivities.mockResolvedValue(activitiesFromGarmin);
+
+    const res = await request(app)
+      .post("/garmin/activities")
+      .set(auth())
+      .send({ username: "u", tokenJson: FAKE_TOKEN });
+
+    const acts = res.body.activities;
+    // Order must match Garmin's response exactly
+    expect(acts.map((a) => a.activityId)).toEqual([10, 9, 8]);
+    // Each activity's date must be earlier than the previous
+    for (let i = 1; i < acts.length; i++) {
+      expect(acts[i].beginTimestamp).toBeLessThan(acts[i - 1].beginTimestamp);
+    }
+  });
 });
 
 // ============================================================

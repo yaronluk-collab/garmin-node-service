@@ -274,6 +274,148 @@ const SPLIT_PROFILE_FIELDS = {
 
 const VALID_PROFILES = new Set(["summary", "coaching", "full"]);
 
+// --------------------
+// Workout semantic group field lists
+// --------------------
+const WORKOUT_IDENTITY_FIELDS = [
+  "activityId",
+  "activityName",
+  "description",
+  "activityType",
+  "sportTypeId",
+  "startTimeLocal",
+  "startTimeGMT",
+  "locationName",
+  "startLatitude",
+  "startLongitude",
+  "endLatitude",
+  "endLongitude",
+];
+
+const WORKOUT_TIMING_FIELDS = [
+  "duration",
+  "movingDuration",
+  "elapsedDuration",
+];
+
+const WORKOUT_DISTANCE_FIELDS = [
+  "distance",
+  "steps",
+];
+
+const WORKOUT_PACE_FIELDS = [
+  "averageSpeed",
+  "averageMovingSpeed",
+  "maxSpeed",
+  "avgGradeAdjustedSpeed",
+];
+
+const WORKOUT_HR_FIELDS = [
+  "averageHR",
+  "maxHR",
+  "minHR",
+];
+
+const WORKOUT_ELEVATION_FIELDS = [
+  "elevationGain",
+  "elevationLoss",
+  "maxElevation",
+  "minElevation",
+];
+
+const WORKOUT_DYNAMICS_FIELDS = [
+  "averageRunCadence",
+  "maxRunCadence",
+  "strideLength",
+  "groundContactTime",
+  "verticalOscillation",
+  "verticalRatio",
+];
+
+const WORKOUT_POWER_FIELDS = [
+  "averagePower",
+  "maxPower",
+  "minPower",
+  "normalizedPower",
+  "totalWork",
+];
+
+const WORKOUT_TRAINING_FIELDS = [
+  "trainingEffect",
+  "anaerobicTrainingEffect",
+  "aerobicTrainingEffectMessage",
+  "anaerobicTrainingEffectMessage",
+  "trainingEffectLabel",
+  "activityTrainingLoad",
+];
+
+const WORKOUT_BODY_FIELDS = [
+  "calories",
+  "avgRespirationRate",
+  "minRespirationRate",
+  "maxRespirationRate",
+  "moderateIntensityMinutes",
+  "vigorousIntensityMinutes",
+  "differenceBodyBattery",
+  "directWorkoutFeel",
+  "directWorkoutRpe",
+  "waterEstimated",
+  "beginPotentialStamina",
+  "endPotentialStamina",
+  "minAvailableStamina",
+];
+
+const WORKOUT_META_FIELDS = [
+  "lapCount",
+  "hasSplits",
+  "manualActivity",
+  "pr",
+  "favorite",
+];
+
+const WORKOUT_LAP_FIELDS = [
+  "lapIndex",
+  "distance",
+  "duration",
+  "movingDuration",
+  "startTimeGMT",
+  "intensityType",
+  // Speed
+  "averageSpeed",
+  "averageMovingSpeed",
+  "maxSpeed",
+  "avgGradeAdjustedSpeed",
+  // Elevation
+  "elevationGain",
+  "elevationLoss",
+  // Heart rate
+  "averageHR",
+  "maxHR",
+  "calories",
+  // Running dynamics
+  "averageRunCadence",
+  "maxRunCadence",
+  "groundContactTime",
+  "strideLength",
+  "verticalOscillation",
+  "verticalRatio",
+  // Power
+  "averagePower",
+  "maxPower",
+  "normalizedPower",
+  "totalWork",
+];
+
+const SPLIT_TYPE_PHASE_MAP = {
+  INTERVAL_WARMUP: "warmup",
+  INTERVAL_ACTIVE: "active",
+  INTERVAL_RECOVERY: "recovery",
+  INTERVAL_COOLDOWN: "cooldown",
+  RWD_RUN: "run",
+  RWD_WALK: "walk",
+  RWD_STAND: "stand",
+};
+
 function pickFields(obj, fields) {
   const result = {};
   for (const key of fields) {
@@ -323,6 +465,33 @@ function flattenActivityDetail(raw) {
   }
 
   return flat;
+}
+
+function transformSplitSummaries(splitSummaries) {
+  if (!Array.isArray(splitSummaries)) return [];
+  return splitSummaries.map(({ splitType, ...rest }) => ({
+    phase: SPLIT_TYPE_PHASE_MAP[splitType] || splitType?.toLowerCase() || "unknown",
+    splitType,
+    ...rest,
+  }));
+}
+
+function buildWorkoutResponse(flat, laps) {
+  return {
+    identity: pickFields(flat, WORKOUT_IDENTITY_FIELDS),
+    timing: pickFields(flat, WORKOUT_TIMING_FIELDS),
+    distance: pickFields(flat, WORKOUT_DISTANCE_FIELDS),
+    pace: pickFields(flat, WORKOUT_PACE_FIELDS),
+    heartRate: pickFields(flat, WORKOUT_HR_FIELDS),
+    elevation: pickFields(flat, WORKOUT_ELEVATION_FIELDS),
+    runningDynamics: pickFields(flat, WORKOUT_DYNAMICS_FIELDS),
+    power: pickFields(flat, WORKOUT_POWER_FIELDS),
+    training: pickFields(flat, WORKOUT_TRAINING_FIELDS),
+    body: pickFields(flat, WORKOUT_BODY_FIELDS),
+    workoutStructure: transformSplitSummaries(flat.splitSummaries),
+    laps: laps.map((lap) => pickFields(lap, WORKOUT_LAP_FIELDS)),
+    meta: pickFields(flat, WORKOUT_META_FIELDS),
+  };
 }
 
 // --------------------
@@ -639,6 +808,50 @@ app.post("/garmin/splits", requireApiKey, (req, res) => {
 });
 
 // --------------------
+// Garmin: WORKOUT (combined activity + splits, semantically grouped)
+// Body: { username/email, tokenJson, activityId? }
+// activityId: optional — omit to fetch most recent activity
+// --------------------
+app.post("/garmin/workout", requireApiKey, (req, res) => {
+  const parsed = parseActivityIdFromBody(req.body);
+  const rawProvided = parsed.activityIdRaw !== null && parsed.activityIdRaw !== undefined;
+  if (rawProvided && !parsed.ok) {
+    return res.status(400).json({
+      ok: false,
+      error: "Invalid activityId",
+      receivedActivityIdRaw: parsed.activityIdRaw,
+      receivedType: parsed.activityIdRawType,
+    });
+  }
+
+  return withGarminToken(req, res, async (client) => {
+    let activityId = parsed.activityId;
+
+    // If no activityId provided, fetch the most recent activity
+    if (!activityId) {
+      const recent = await client.getActivities(0, 1);
+      if (!recent || recent.length === 0) {
+        throw new Error("No activities found");
+      }
+      activityId = recent[0].activityId;
+    }
+
+    // Parallel fetch: activity detail + splits
+    const splitsUrl = `https://connectapi.garmin.com/activity-service/activity/${activityId}/splits`;
+    const [rawActivity, rawSplits] = await Promise.all([
+      client.getActivity({ activityId }),
+      client.get(splitsUrl),
+    ]);
+
+    const flat = flattenActivityDetail(rawActivity);
+    const laps = rawSplits?.lapDTOs || [];
+    const workout = buildWorkoutResponse(flat, laps);
+
+    return { activityId, workout };
+  });
+});
+
+// --------------------
 // Start server
 // --------------------
 // Export app and helpers for testing; only start listener when run directly
@@ -655,6 +868,21 @@ export {
   SPLIT_COACHING_FIELDS,
   pickFields,
   flattenActivityDetail,
+  buildWorkoutResponse,
+  transformSplitSummaries,
+  SPLIT_TYPE_PHASE_MAP,
+  WORKOUT_IDENTITY_FIELDS,
+  WORKOUT_TIMING_FIELDS,
+  WORKOUT_DISTANCE_FIELDS,
+  WORKOUT_PACE_FIELDS,
+  WORKOUT_HR_FIELDS,
+  WORKOUT_ELEVATION_FIELDS,
+  WORKOUT_DYNAMICS_FIELDS,
+  WORKOUT_POWER_FIELDS,
+  WORKOUT_TRAINING_FIELDS,
+  WORKOUT_BODY_FIELDS,
+  WORKOUT_META_FIELDS,
+  WORKOUT_LAP_FIELDS,
 };
 
 if (process.argv[1] && import.meta.url.endsWith(process.argv[1].replace(/^.*[\\/]/, ""))) {

@@ -34,6 +34,9 @@ const {
   canAttemptPasswordLogin,
   markPasswordLoginAttempt,
   lastPasswordLoginAttemptByUsername,
+  SUMMARY_FIELDS,
+  COACHING_FIELDS,
+  pickFields,
 } = await import("./server.js");
 
 // ---------------------
@@ -53,7 +56,45 @@ beforeEach(() => {
   mockLoadToken.mockResolvedValue(undefined);
   mockGetUserProfile.mockResolvedValue({ displayName: "TestUser" });
   mockGetActivities.mockResolvedValue([{ activityId: 1 }, { activityId: 2 }]);
-  mockGetActivity.mockResolvedValue({ activityId: 99, name: "Morning Run" });
+  mockGetActivity.mockResolvedValue({
+    activityId: 99,
+    activityName: "Morning Run",
+    description: null,
+    activityType: { typeId: 1, typeKey: "running", parentTypeId: 17 },
+    sportTypeId: 1,
+    startTimeLocal: "2026-02-05 07:15:00",
+    startTimeGMT: "2026-02-05 15:15:00",
+    beginTimestamp: 1738764900000,
+    locationName: "Tel Aviv",
+    duration: 2834.5,
+    movingDuration: 2790.1,
+    elapsedDuration: 2900.0,
+    distance: 8012.5,
+    averageSpeed: 2.83,
+    maxSpeed: 4.1,
+    elevationGain: 45.0,
+    elevationLoss: 43.0,
+    minElevation: 2.0,
+    maxElevation: 28.0,
+    averageHR: 152,
+    maxHR: 178,
+    calories: 620,
+    steps: 8450,
+    vO2MaxValue: 48.0,
+    aerobicTrainingEffect: 3.2,
+    anaerobicTrainingEffect: 1.1,
+    lapCount: 5,
+    splitSummaries: [],
+    hasSplits: true,
+    pr: false,
+    manualActivity: false,
+    // Fields NOT in coaching/summary profiles:
+    ownerDisplayName: "TestUser",
+    ownerId: 12345,
+    ownerProfileImageUrlSmall: "http://example.com/img.jpg",
+    privacy: { typeId: 2, typeKey: "private" },
+    userRoles: ["ROLE_USER"],
+  });
   mockLogin.mockResolvedValue(undefined);
 });
 
@@ -525,32 +566,153 @@ describe("POST /garmin/activities", () => {
 // ============================================================
 
 describe("POST /garmin/activity", () => {
-  it("returns full activity by ID", async () => {
+  // --- Basic fetch by ID ---
+
+  it("returns full activity by ID (default profile)", async () => {
     const res = await request(app)
       .post("/garmin/activity")
       .set(auth())
       .send({ username: "u", tokenJson: FAKE_TOKEN, activityId: 99 });
     expect(res.status).toBe(200);
     expect(res.body.ok).toBe(true);
-    expect(res.body.activity).toEqual({ activityId: 99, name: "Morning Run" });
-    expect(mockGetActivity).toHaveBeenCalledWith(99);
+    expect(res.body.profile).toBe("full");
+    expect(res.body.activity.activityId).toBe(99);
+    expect(res.body.activity.activityName).toBe("Morning Run");
+    // Full profile includes owner fields
+    expect(res.body.activity.ownerDisplayName).toBe("TestUser");
+    expect(mockGetActivity).toHaveBeenCalledWith({ activityId: 99 });
   });
 
-  it("returns 400 for missing activityId", async () => {
+  it("accepts string activityId", async () => {
+    const res = await request(app)
+      .post("/garmin/activity")
+      .set(auth())
+      .send({ username: "u", tokenJson: FAKE_TOKEN, activityId: "99" });
+    expect(res.status).toBe(200);
+    expect(mockGetActivity).toHaveBeenCalledWith({ activityId: 99 });
+  });
+
+  // --- Profile filtering ---
+
+  it("returns only summary fields with profile=summary", async () => {
+    const res = await request(app)
+      .post("/garmin/activity")
+      .set(auth())
+      .send({ username: "u", tokenJson: FAKE_TOKEN, activityId: 99, profile: "summary" });
+    expect(res.status).toBe(200);
+    expect(res.body.profile).toBe("summary");
+    const keys = Object.keys(res.body.activity);
+    // Should contain only summary fields
+    for (const key of keys) {
+      expect(SUMMARY_FIELDS).toContain(key);
+    }
+    // Should have the core fields
+    expect(res.body.activity.activityId).toBe(99);
+    expect(res.body.activity.duration).toBe(2834.5);
+    // Should NOT have coaching/full-only fields
+    expect(res.body.activity.ownerDisplayName).toBeUndefined();
+    expect(res.body.activity.vO2MaxValue).toBeUndefined();
+    expect(res.body.activity.locationName).toBeUndefined();
+  });
+
+  it("returns coaching fields with profile=coaching", async () => {
+    const res = await request(app)
+      .post("/garmin/activity")
+      .set(auth())
+      .send({ username: "u", tokenJson: FAKE_TOKEN, activityId: 99, profile: "coaching" });
+    expect(res.status).toBe(200);
+    expect(res.body.profile).toBe("coaching");
+    const keys = Object.keys(res.body.activity);
+    for (const key of keys) {
+      expect(COACHING_FIELDS).toContain(key);
+    }
+    // Should have coaching fields
+    expect(res.body.activity.activityId).toBe(99);
+    expect(res.body.activity.vO2MaxValue).toBe(48.0);
+    expect(res.body.activity.locationName).toBe("Tel Aviv");
+    expect(res.body.activity.aerobicTrainingEffect).toBe(3.2);
+    // Should NOT have owner/privacy fields
+    expect(res.body.activity.ownerDisplayName).toBeUndefined();
+    expect(res.body.activity.privacy).toBeUndefined();
+  });
+
+  it("returns all fields with profile=full", async () => {
+    const res = await request(app)
+      .post("/garmin/activity")
+      .set(auth())
+      .send({ username: "u", tokenJson: FAKE_TOKEN, activityId: 99, profile: "full" });
+    expect(res.status).toBe(200);
+    expect(res.body.profile).toBe("full");
+    // Full includes everything
+    expect(res.body.activity.ownerDisplayName).toBe("TestUser");
+    expect(res.body.activity.vO2MaxValue).toBe(48.0);
+  });
+
+  it("rejects invalid profile value", async () => {
+    const res = await request(app)
+      .post("/garmin/activity")
+      .set(auth())
+      .send({ username: "u", tokenJson: FAKE_TOKEN, activityId: 99, profile: "xyz" });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/Invalid profile/);
+  });
+
+  // --- Most recent activity (no activityId) ---
+
+  it("fetches most recent activity when activityId is omitted", async () => {
+    mockGetActivities.mockResolvedValue([{ activityId: 77 }]);
     const res = await request(app)
       .post("/garmin/activity")
       .set(auth())
       .send({ username: "u", tokenJson: FAKE_TOKEN });
-    expect(res.status).toBe(400);
-    expect(res.body.error).toMatch(/activityId/);
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    // Should have fetched the list first
+    expect(mockGetActivities).toHaveBeenCalledWith(0, 1);
+    // Then fetched the detail for the most recent
+    expect(mockGetActivity).toHaveBeenCalledWith({ activityId: 77 });
   });
 
-  it("returns 400 for invalid activityId", async () => {
+  it("does not call getActivities when activityId is provided", async () => {
+    const res = await request(app)
+      .post("/garmin/activity")
+      .set(auth())
+      .send({ username: "u", tokenJson: FAKE_TOKEN, activityId: 99 });
+    expect(res.status).toBe(200);
+    expect(mockGetActivities).not.toHaveBeenCalled();
+  });
+
+  it("returns 500 when user has no activities and activityId omitted", async () => {
+    mockGetActivities.mockResolvedValue([]);
+    const res = await request(app)
+      .post("/garmin/activity")
+      .set(auth())
+      .send({ username: "u", tokenJson: FAKE_TOKEN });
+    expect(res.status).toBe(500);
+    expect(res.body.ok).toBe(false);
+  });
+
+  it("supports profile with most-recent fetch", async () => {
+    mockGetActivities.mockResolvedValue([{ activityId: 77 }]);
+    const res = await request(app)
+      .post("/garmin/activity")
+      .set(auth())
+      .send({ username: "u", tokenJson: FAKE_TOKEN, profile: "summary" });
+    expect(res.status).toBe(200);
+    expect(res.body.profile).toBe("summary");
+    // Should NOT have full-only fields
+    expect(res.body.activity.ownerDisplayName).toBeUndefined();
+  });
+
+  // --- Validation ---
+
+  it("returns 400 for invalid activityId (e.g. 'abc')", async () => {
     const res = await request(app)
       .post("/garmin/activity")
       .set(auth())
       .send({ username: "u", tokenJson: FAKE_TOKEN, activityId: "abc" });
     expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/activityId/i);
   });
 
   it("returns 400 when missing username", async () => {
@@ -569,14 +731,7 @@ describe("POST /garmin/activity", () => {
     expect(res.status).toBe(400);
   });
 
-  it("accepts string activityId", async () => {
-    const res = await request(app)
-      .post("/garmin/activity")
-      .set(auth())
-      .send({ username: "u", tokenJson: FAKE_TOKEN, activityId: "99" });
-    expect(res.status).toBe(200);
-    expect(mockGetActivity).toHaveBeenCalledWith(99);
-  });
+  // --- Error handling ---
 
   it("returns 401 on token-related errors", async () => {
     mockGetActivity.mockRejectedValue(new Error("Session expired"));
@@ -596,5 +751,31 @@ describe("POST /garmin/activity", () => {
       .send({ username: "u", tokenJson: FAKE_TOKEN, activityId: 1 });
     expect(res.status).toBe(500);
     expect(res.body.error).toBe("Garmin request failed");
+  });
+});
+
+// ============================================================
+// pickFields HELPER TESTS
+// ============================================================
+
+describe("pickFields", () => {
+  it("picks only specified fields", () => {
+    const obj = { a: 1, b: 2, c: 3 };
+    expect(pickFields(obj, ["a", "c"])).toEqual({ a: 1, c: 3 });
+  });
+
+  it("ignores fields not present in object", () => {
+    const obj = { a: 1 };
+    expect(pickFields(obj, ["a", "missing"])).toEqual({ a: 1 });
+  });
+
+  it("returns empty object for empty fields list", () => {
+    expect(pickFields({ a: 1 }, [])).toEqual({});
+  });
+
+  it("preserves nested objects", () => {
+    const obj = { activityType: { typeKey: "running" }, other: 1 };
+    const result = pickFields(obj, ["activityType"]);
+    expect(result).toEqual({ activityType: { typeKey: "running" } });
   });
 });

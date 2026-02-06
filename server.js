@@ -111,6 +111,111 @@ function parseActivityIdFromBody(body) {
 }
 
 // --------------------
+// Activity field profiles
+// --------------------
+const SUMMARY_FIELDS = [
+  "activityId",
+  "activityName",
+  "activityType",
+  "sportTypeId",
+  "startTimeLocal",
+  "duration",
+  "distance",
+  "calories",
+  "averageHR",
+  "maxHR",
+  "elevationGain",
+  "steps",
+];
+
+const COACHING_FIELDS = [
+  // Identity
+  "activityId",
+  "activityName",
+  "description",
+  "activityType",
+  "sportTypeId",
+  "startTimeLocal",
+  "startTimeGMT",
+  "beginTimestamp",
+  "locationName",
+  // Duration
+  "duration",
+  "movingDuration",
+  "elapsedDuration",
+  // Distance & speed
+  "distance",
+  "averageSpeed",
+  "maxSpeed",
+  // Elevation
+  "elevationGain",
+  "elevationLoss",
+  "minElevation",
+  "maxElevation",
+  // Heart rate
+  "averageHR",
+  "maxHR",
+  // Calories
+  "calories",
+  // Running metrics
+  "averageRunningCadenceInStepsPerMinute",
+  "maxRunningCadenceInStepsPerMinute",
+  "avgStrideLength",
+  "steps",
+  // Cycling metrics
+  "averageBikingCadenceInRevPerMinute",
+  "maxBikingCadenceInRevPerMinute",
+  // Swimming metrics
+  "averageSwimCadenceInStrokesPerMinute",
+  "averageSwolf",
+  "activeLengths",
+  // Power
+  "avgPower",
+  "maxPower",
+  "normPower",
+  // Training load & effect
+  "vO2MaxValue",
+  "aerobicTrainingEffect",
+  "anaerobicTrainingEffect",
+  "trainingEffectLabel",
+  "activityTrainingLoad",
+  // Stress & respiration
+  "avgStress",
+  "startStress",
+  "endStress",
+  "differenceStress",
+  "avgRespirationRate",
+  // Strength
+  "totalSets",
+  "activeSets",
+  "totalReps",
+  // Structure
+  "lapCount",
+  "splitSummaries",
+  "hasSplits",
+  // Flags
+  "pr",
+  "manualActivity",
+];
+
+const PROFILE_FIELDS = {
+  summary: SUMMARY_FIELDS,
+  coaching: COACHING_FIELDS,
+};
+
+const VALID_PROFILES = new Set(["summary", "coaching", "full"]);
+
+function pickFields(obj, fields) {
+  const result = {};
+  for (const key of fields) {
+    if (key in obj) {
+      result[key] = obj[key];
+    }
+  }
+  return result;
+}
+
+// --------------------
 // Health + Debug routes
 // --------------------
 app.get("/health", (req, res) => res.json({ ok: true }));
@@ -289,22 +394,49 @@ app.post("/garmin/activities", requireApiKey, (req, res) =>
 
 // --------------------
 // Garmin: SINGLE ACTIVITY
-// Body: { username/email, tokenJson, activityId }
+// Body: { username/email, tokenJson, activityId?, profile? }
+// activityId: optional — omit to fetch most recent activity
+// profile: "summary" | "coaching" | "full" (default: "full")
 // --------------------
 app.post("/garmin/activity", requireApiKey, (req, res) => {
-  const parsed = parseActivityIdFromBody(req.body);
-  if (!parsed.ok) {
+  const profile = req.body?.profile || "full";
+  if (!VALID_PROFILES.has(profile)) {
     return res.status(400).json({
       ok: false,
-      error: "Missing/invalid activityId",
-      receivedKeys: Object.keys(req.body || {}),
+      error: `Invalid profile "${profile}". Must be one of: summary, coaching, full`,
+    });
+  }
+
+  const parsed = parseActivityIdFromBody(req.body);
+  // If an activityId value was provided but is invalid (e.g. "abc"), that's still an error
+  const rawProvided = parsed.activityIdRaw !== null && parsed.activityIdRaw !== undefined;
+  if (rawProvided && !parsed.ok) {
+    return res.status(400).json({
+      ok: false,
+      error: "Invalid activityId",
       receivedActivityIdRaw: parsed.activityIdRaw,
       receivedType: parsed.activityIdRawType,
     });
   }
-  return withGarminToken(req, res, async (client) => ({
-    activity: await client.getActivity(parsed.activityId),
-  }));
+
+  return withGarminToken(req, res, async (client) => {
+    let activityId = parsed.activityId;
+
+    // If no activityId provided, fetch the most recent activity
+    if (!activityId) {
+      const recent = await client.getActivities(0, 1);
+      if (!recent || recent.length === 0) {
+        throw new Error("No activities found");
+      }
+      activityId = recent[0].activityId;
+    }
+
+    const raw = await client.getActivity({ activityId });
+    const fields = PROFILE_FIELDS[profile];
+    const activity = fields ? pickFields(raw, fields) : raw;
+
+    return { activity, profile };
+  });
 });
 
 // --------------------
@@ -318,6 +450,9 @@ export {
   markPasswordLoginAttempt,
   lastPasswordLoginAttemptByUsername,
   withGarminToken,
+  SUMMARY_FIELDS,
+  COACHING_FIELDS,
+  pickFields,
 };
 
 if (process.argv[1] && import.meta.url.endsWith(process.argv[1].replace(/^.*[\\/]/, ""))) {

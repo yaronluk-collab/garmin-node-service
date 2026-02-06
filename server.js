@@ -146,6 +146,7 @@ const COACHING_FIELDS = [
   // Distance & speed
   "distance",
   "averageSpeed",
+  "averageMovingSpeed",
   "maxSpeed",
   // Elevation
   "elevationGain",
@@ -157,10 +158,13 @@ const COACHING_FIELDS = [
   "maxHR",
   // Calories
   "calories",
-  // Running metrics
+  // Running metrics (both getActivities and getActivity field names)
   "averageRunningCadenceInStepsPerMinute",
+  "averageRunCadence",
   "maxRunningCadenceInStepsPerMinute",
+  "maxRunCadence",
   "avgStrideLength",
+  "strideLength",
   "steps",
   // Cycling metrics
   "averageBikingCadenceInRevPerMinute",
@@ -173,9 +177,10 @@ const COACHING_FIELDS = [
   "avgPower",
   "maxPower",
   "normPower",
-  // Training load & effect
+  // Training load & effect (both naming conventions)
   "vO2MaxValue",
   "aerobicTrainingEffect",
+  "trainingEffect",
   "anaerobicTrainingEffect",
   "trainingEffectLabel",
   "activityTrainingLoad",
@@ -213,6 +218,47 @@ function pickFields(obj, fields) {
     }
   }
   return result;
+}
+
+// getActivity() returns IActivityDetails with nested DTOs (summaryDTO, metadataDTO,
+// activityTypeDTO, etc.). Flatten them into a single-level object so profile field
+// lists can find metrics like distance, averageHR, calories, etc.
+function flattenActivityDetail(raw) {
+  if (!raw || typeof raw !== "object") return raw;
+
+  const {
+    summaryDTO,
+    metadataDTO,
+    activityTypeDTO,
+    eventTypeDTO,
+    timeZoneUnitDTO,
+    accessControlRuleDTO,
+    ...topLevel
+  } = raw;
+
+  const flat = {
+    ...topLevel,
+    ...(summaryDTO || {}),
+  };
+
+  // Map activityTypeDTO → activityType for consistency with getActivities()
+  if (activityTypeDTO && !flat.activityType) {
+    flat.activityType = activityTypeDTO;
+  }
+
+  // Pull useful metadataDTO fields to top level
+  if (metadataDTO) {
+    if (metadataDTO.lapCount !== undefined) flat.lapCount = metadataDTO.lapCount;
+    if (metadataDTO.hasSplits !== undefined) flat.hasSplits = metadataDTO.hasSplits;
+    if (metadataDTO.manualActivity !== undefined) flat.manualActivity = metadataDTO.manualActivity;
+    if (metadataDTO.personalRecord !== undefined) flat.pr = metadataDTO.personalRecord;
+    if (metadataDTO.manufacturer !== undefined) flat.manufacturer = metadataDTO.manufacturer;
+    if (metadataDTO.favorite !== undefined) flat.favorite = metadataDTO.favorite;
+    if (metadataDTO.autoCalcCalories !== undefined) flat.autoCalcCalories = metadataDTO.autoCalcCalories;
+    if (metadataDTO.elevationCorrected !== undefined) flat.elevationCorrected = metadataDTO.elevationCorrected;
+  }
+
+  return flat;
 }
 
 // --------------------
@@ -432,8 +478,9 @@ app.post("/garmin/activity", requireApiKey, (req, res) => {
     }
 
     const raw = await client.getActivity({ activityId });
+    const flat = flattenActivityDetail(raw);
     const fields = PROFILE_FIELDS[profile];
-    const activity = fields ? pickFields(raw, fields) : raw;
+    const activity = fields ? pickFields(flat, fields) : flat;
 
     return { activity, profile };
   });
@@ -453,6 +500,7 @@ export {
   SUMMARY_FIELDS,
   COACHING_FIELDS,
   pickFields,
+  flattenActivityDetail,
 };
 
 if (process.argv[1] && import.meta.url.endsWith(process.argv[1].replace(/^.*[\\/]/, ""))) {

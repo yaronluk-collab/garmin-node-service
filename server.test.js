@@ -37,6 +37,7 @@ const {
   SUMMARY_FIELDS,
   COACHING_FIELDS,
   pickFields,
+  flattenActivityDetail,
 } = await import("./server.js");
 
 // ---------------------
@@ -56,44 +57,66 @@ beforeEach(() => {
   mockLoadToken.mockResolvedValue(undefined);
   mockGetUserProfile.mockResolvedValue({ displayName: "TestUser" });
   mockGetActivities.mockResolvedValue([{ activityId: 1 }, { activityId: 2 }]);
+  // Mock returns nested IActivityDetails structure (as real Garmin API does)
   mockGetActivity.mockResolvedValue({
     activityId: 99,
     activityName: "Morning Run",
-    description: null,
-    activityType: { typeId: 1, typeKey: "running", parentTypeId: 17 },
-    sportTypeId: 1,
-    startTimeLocal: "2026-02-05 07:15:00",
-    startTimeGMT: "2026-02-05 15:15:00",
-    beginTimestamp: 1738764900000,
+    userProfileId: 12345,
+    isMultiSportParent: false,
+    activityTypeDTO: {
+      typeId: 1,
+      typeKey: "running",
+      parentTypeId: 17,
+      isHidden: false,
+      restricted: false,
+      trimmable: true,
+    },
+    eventTypeDTO: { typeId: 5, typeKey: "training", sortOrder: 7 },
+    accessControlRuleDTO: { typeId: 2, typeKey: "private" },
+    timeZoneUnitDTO: { unitId: 124, unitKey: "Asia/Jerusalem", factor: 7200, timeZone: "Asia/Jerusalem" },
+    metadataDTO: {
+      isOriginal: true,
+      deviceApplicationInstallationId: 1234,
+      manufacturer: "Garmin",
+      lapCount: 5,
+      hasSplits: true,
+      personalRecord: false,
+      manualActivity: false,
+      autoCalcCalories: false,
+      favorite: false,
+      elevationCorrected: true,
+      hasPolyline: true,
+    },
+    summaryDTO: {
+      startTimeLocal: "2026-02-05 07:15:00",
+      startTimeGMT: "2026-02-05 05:15:00",
+      startLatitude: 32.0853,
+      startLongitude: 34.7818,
+      distance: 8012.5,
+      duration: 2834.5,
+      movingDuration: 2790.1,
+      elapsedDuration: 2900.0,
+      elevationGain: 45.0,
+      elevationLoss: 43.0,
+      maxElevation: 28.0,
+      minElevation: 2.0,
+      averageSpeed: 2.83,
+      averageMovingSpeed: 2.87,
+      maxSpeed: 4.1,
+      calories: 620,
+      averageHR: 152,
+      maxHR: 178,
+      averageRunCadence: 172,
+      maxRunCadence: 184,
+      strideLength: 1.05,
+      trainingEffect: 3.2,
+      anaerobicTrainingEffect: 1.1,
+      maxVerticalSpeed: 0.5,
+    },
     locationName: "Tel Aviv",
-    duration: 2834.5,
-    movingDuration: 2790.1,
-    elapsedDuration: 2900.0,
-    distance: 8012.5,
-    averageSpeed: 2.83,
-    maxSpeed: 4.1,
-    elevationGain: 45.0,
-    elevationLoss: 43.0,
-    minElevation: 2.0,
-    maxElevation: 28.0,
-    averageHR: 152,
-    maxHR: 178,
-    calories: 620,
-    steps: 8450,
-    vO2MaxValue: 48.0,
-    aerobicTrainingEffect: 3.2,
-    anaerobicTrainingEffect: 1.1,
-    lapCount: 5,
-    splitSummaries: [],
-    hasSplits: true,
-    pr: false,
-    manualActivity: false,
-    // Fields NOT in coaching/summary profiles:
-    ownerDisplayName: "TestUser",
-    ownerId: 12345,
-    ownerProfileImageUrlSmall: "http://example.com/img.jpg",
-    privacy: { typeId: 2, typeKey: "private" },
-    userRoles: ["ROLE_USER"],
+    splitSummaries: [
+      { distance: 1000, duration: 345.0, splitType: "INTERVAL", noOfSplits: 5 },
+    ],
   });
   mockLogin.mockResolvedValue(undefined);
 });
@@ -578,8 +601,12 @@ describe("POST /garmin/activity", () => {
     expect(res.body.profile).toBe("full");
     expect(res.body.activity.activityId).toBe(99);
     expect(res.body.activity.activityName).toBe("Morning Run");
-    // Full profile includes owner fields
-    expect(res.body.activity.ownerDisplayName).toBe("TestUser");
+    // Full profile includes flattened summaryDTO fields
+    expect(res.body.activity.distance).toBe(8012.5);
+    expect(res.body.activity.userProfileId).toBe(12345);
+    // Nested DTOs are flattened away
+    expect(res.body.activity.summaryDTO).toBeUndefined();
+    expect(res.body.activity.metadataDTO).toBeUndefined();
     expect(mockGetActivity).toHaveBeenCalledWith({ activityId: 99 });
   });
 
@@ -606,13 +633,16 @@ describe("POST /garmin/activity", () => {
     for (const key of keys) {
       expect(SUMMARY_FIELDS).toContain(key);
     }
-    // Should have the core fields
+    // Should have the core fields (from flattened summaryDTO)
     expect(res.body.activity.activityId).toBe(99);
     expect(res.body.activity.duration).toBe(2834.5);
+    expect(res.body.activity.distance).toBe(8012.5);
+    expect(res.body.activity.averageHR).toBe(152);
+    expect(res.body.activity.calories).toBe(620);
     // Should NOT have coaching/full-only fields
-    expect(res.body.activity.ownerDisplayName).toBeUndefined();
-    expect(res.body.activity.vO2MaxValue).toBeUndefined();
+    expect(res.body.activity.userProfileId).toBeUndefined();
     expect(res.body.activity.locationName).toBeUndefined();
+    expect(res.body.activity.trainingEffect).toBeUndefined();
   });
 
   it("returns coaching fields with profile=coaching", async () => {
@@ -626,14 +656,16 @@ describe("POST /garmin/activity", () => {
     for (const key of keys) {
       expect(COACHING_FIELDS).toContain(key);
     }
-    // Should have coaching fields
+    // Should have coaching fields (from flattened summaryDTO + metadataDTO)
     expect(res.body.activity.activityId).toBe(99);
-    expect(res.body.activity.vO2MaxValue).toBe(48.0);
     expect(res.body.activity.locationName).toBe("Tel Aviv");
-    expect(res.body.activity.aerobicTrainingEffect).toBe(3.2);
-    // Should NOT have owner/privacy fields
-    expect(res.body.activity.ownerDisplayName).toBeUndefined();
-    expect(res.body.activity.privacy).toBeUndefined();
+    expect(res.body.activity.trainingEffect).toBe(3.2);
+    expect(res.body.activity.averageHR).toBe(152);
+    expect(res.body.activity.lapCount).toBe(5);
+    expect(res.body.activity.averageRunCadence).toBe(172);
+    // Should NOT have non-coaching fields
+    expect(res.body.activity.userProfileId).toBeUndefined();
+    expect(res.body.activity.startLatitude).toBeUndefined();
   });
 
   it("returns all fields with profile=full", async () => {
@@ -643,9 +675,11 @@ describe("POST /garmin/activity", () => {
       .send({ username: "u", tokenJson: FAKE_TOKEN, activityId: 99, profile: "full" });
     expect(res.status).toBe(200);
     expect(res.body.profile).toBe("full");
-    // Full includes everything
-    expect(res.body.activity.ownerDisplayName).toBe("TestUser");
-    expect(res.body.activity.vO2MaxValue).toBe(48.0);
+    // Full includes everything flattened
+    expect(res.body.activity.distance).toBe(8012.5);
+    expect(res.body.activity.lapCount).toBe(5);
+    expect(res.body.activity.locationName).toBe("Tel Aviv");
+    expect(res.body.activity.userProfileId).toBe(12345);
   });
 
   it("rejects invalid profile value", async () => {
@@ -700,8 +734,9 @@ describe("POST /garmin/activity", () => {
       .send({ username: "u", tokenJson: FAKE_TOKEN, profile: "summary" });
     expect(res.status).toBe(200);
     expect(res.body.profile).toBe("summary");
-    // Should NOT have full-only fields
-    expect(res.body.activity.ownerDisplayName).toBeUndefined();
+    // Should NOT have non-summary fields
+    expect(res.body.activity.userProfileId).toBeUndefined();
+    expect(res.body.activity.locationName).toBeUndefined();
   });
 
   // --- Validation ---
@@ -757,6 +792,73 @@ describe("POST /garmin/activity", () => {
 // ============================================================
 // pickFields HELPER TESTS
 // ============================================================
+
+describe("flattenActivityDetail", () => {
+  it("spreads summaryDTO fields to top level", () => {
+    const raw = {
+      activityId: 1,
+      summaryDTO: { distance: 5000, duration: 1200, averageHR: 150 },
+    };
+    const flat = flattenActivityDetail(raw);
+    expect(flat.activityId).toBe(1);
+    expect(flat.distance).toBe(5000);
+    expect(flat.duration).toBe(1200);
+    expect(flat.averageHR).toBe(150);
+    expect(flat.summaryDTO).toBeUndefined();
+  });
+
+  it("maps activityTypeDTO to activityType", () => {
+    const raw = {
+      activityId: 1,
+      activityTypeDTO: { typeId: 1, typeKey: "running" },
+    };
+    const flat = flattenActivityDetail(raw);
+    expect(flat.activityType).toEqual({ typeId: 1, typeKey: "running" });
+    expect(flat.activityTypeDTO).toBeUndefined();
+  });
+
+  it("pulls metadataDTO fields (lapCount, pr, manualActivity, etc.)", () => {
+    const raw = {
+      activityId: 1,
+      metadataDTO: {
+        lapCount: 3,
+        hasSplits: true,
+        personalRecord: true,
+        manualActivity: false,
+        manufacturer: "Garmin",
+        favorite: false,
+        autoCalcCalories: true,
+        elevationCorrected: true,
+      },
+    };
+    const flat = flattenActivityDetail(raw);
+    expect(flat.lapCount).toBe(3);
+    expect(flat.hasSplits).toBe(true);
+    expect(flat.pr).toBe(true);
+    expect(flat.manualActivity).toBe(false);
+    expect(flat.manufacturer).toBe("Garmin");
+    expect(flat.metadataDTO).toBeUndefined();
+  });
+
+  it("removes eventTypeDTO, timeZoneUnitDTO, accessControlRuleDTO", () => {
+    const raw = {
+      activityId: 1,
+      eventTypeDTO: { typeId: 5 },
+      timeZoneUnitDTO: { unitId: 124 },
+      accessControlRuleDTO: { typeId: 2 },
+    };
+    const flat = flattenActivityDetail(raw);
+    expect(flat.activityId).toBe(1);
+    expect(flat.eventTypeDTO).toBeUndefined();
+    expect(flat.timeZoneUnitDTO).toBeUndefined();
+    expect(flat.accessControlRuleDTO).toBeUndefined();
+  });
+
+  it("returns non-object input as-is", () => {
+    expect(flattenActivityDetail(null)).toBe(null);
+    expect(flattenActivityDetail(undefined)).toBe(undefined);
+  });
+});
 
 describe("pickFields", () => {
   it("picks only specified fields", () => {

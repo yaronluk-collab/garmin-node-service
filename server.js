@@ -208,6 +208,70 @@ const PROFILE_FIELDS = {
   coaching: COACHING_FIELDS,
 };
 
+// --------------------
+// Split/lap field profiles
+// --------------------
+const SPLIT_SUMMARY_FIELDS = [
+  "lapIndex",
+  "distance",
+  "duration",
+  "movingDuration",
+  "averageSpeed",
+  "maxSpeed",
+  "elevationGain",
+  "elevationLoss",
+  "averageHR",
+  "maxHR",
+  "calories",
+  "startTimeGMT",
+  "intensityType",
+];
+
+const SPLIT_COACHING_FIELDS = [
+  // Identity & timing
+  "lapIndex",
+  "distance",
+  "duration",
+  "movingDuration",
+  "elapsedDuration",
+  "startTimeGMT",
+  "intensityType",
+  "messageIndex",
+  // Speed
+  "averageSpeed",
+  "averageMovingSpeed",
+  "maxSpeed",
+  "avgGradeAdjustedSpeed",
+  // Elevation
+  "elevationGain",
+  "elevationLoss",
+  "maxElevation",
+  "minElevation",
+  // Heart rate
+  "averageHR",
+  "maxHR",
+  "calories",
+  "bmrCalories",
+  // Running dynamics
+  "averageRunCadence",
+  "maxRunCadence",
+  "groundContactTime",
+  "strideLength",
+  "verticalOscillation",
+  "verticalRatio",
+  // Power
+  "averagePower",
+  "maxPower",
+  "minPower",
+  "normalizedPower",
+  "totalWork",
+];
+
+const SPLIT_PROFILE_FIELDS = {
+  summary: SPLIT_SUMMARY_FIELDS,
+  coaching: SPLIT_COACHING_FIELDS,
+};
+
 const VALID_PROFILES = new Set(["summary", "coaching", "full"]);
 
 function pickFields(obj, fields) {
@@ -518,6 +582,63 @@ app.post("/garmin/activity", requireApiKey, (req, res) => {
 });
 
 // --------------------
+// Garmin: SPLITS / LAPS
+// Body: { username/email, tokenJson, activityId?, profile? }
+// activityId: optional — omit to fetch most recent activity
+// profile: "summary" | "coaching" | "full" (default: "full")
+// --------------------
+app.post("/garmin/splits", requireApiKey, (req, res) => {
+  const profile = req.body?.profile || "full";
+  if (!VALID_PROFILES.has(profile)) {
+    return res.status(400).json({
+      ok: false,
+      error: `Invalid profile "${profile}". Must be one of: summary, coaching, full`,
+    });
+  }
+
+  const parsed = parseActivityIdFromBody(req.body);
+  const rawProvided = parsed.activityIdRaw !== null && parsed.activityIdRaw !== undefined;
+  if (rawProvided && !parsed.ok) {
+    return res.status(400).json({
+      ok: false,
+      error: "Invalid activityId",
+      receivedActivityIdRaw: parsed.activityIdRaw,
+      receivedType: parsed.activityIdRawType,
+    });
+  }
+
+  return withGarminToken(req, res, async (client) => {
+    let activityId = parsed.activityId;
+
+    // If no activityId provided, fetch the most recent activity
+    if (!activityId) {
+      const recent = await client.getActivities(0, 1);
+      if (!recent || recent.length === 0) {
+        throw new Error("No activities found");
+      }
+      activityId = recent[0].activityId;
+    }
+
+    const url = `https://connectapi.garmin.com/activity-service/activity/${activityId}/splits`;
+    const raw = await client.get(url);
+
+    let laps = raw?.lapDTOs || [];
+
+    const fields = SPLIT_PROFILE_FIELDS[profile];
+    if (fields) {
+      laps = laps.map((lap) => pickFields(lap, fields));
+    }
+
+    return {
+      activityId: raw?.activityId ?? activityId,
+      laps,
+      lapCount: laps.length,
+      profile,
+    };
+  });
+});
+
+// --------------------
 // Start server
 // --------------------
 // Export app and helpers for testing; only start listener when run directly
@@ -530,6 +651,8 @@ export {
   withGarminToken,
   SUMMARY_FIELDS,
   COACHING_FIELDS,
+  SPLIT_SUMMARY_FIELDS,
+  SPLIT_COACHING_FIELDS,
   pickFields,
   flattenActivityDetail,
 };

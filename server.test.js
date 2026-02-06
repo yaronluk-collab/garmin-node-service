@@ -8,6 +8,7 @@ const mockLogin = vi.fn();
 const mockGetUserProfile = vi.fn();
 const mockGetActivities = vi.fn();
 const mockGetActivity = vi.fn();
+const mockGet = vi.fn();
 const mockExportToken = vi.fn();
 const mockLoadToken = vi.fn();
 
@@ -21,6 +22,7 @@ vi.mock("@flow-js/garmin-connect", () => {
     getUserProfile(...args) { return mockGetUserProfile(...args); }
     getActivities(...args) { return mockGetActivities(...args); }
     getActivity(...args) { return mockGetActivity(...args); }
+    get(...args) { return mockGet(...args); }
     exportToken(...args) { return mockExportToken(...args); }
     loadToken(...args) { return mockLoadToken(...args); }
   }
@@ -36,6 +38,8 @@ const {
   lastPasswordLoginAttemptByUsername,
   SUMMARY_FIELDS,
   COACHING_FIELDS,
+  SPLIT_SUMMARY_FIELDS,
+  SPLIT_COACHING_FIELDS,
   pickFields,
   flattenActivityDetail,
 } = await import("./server.js");
@@ -924,6 +928,377 @@ describe("flattenActivityDetail", () => {
   it("returns non-object input as-is", () => {
     expect(flattenActivityDetail(null)).toBe(null);
     expect(flattenActivityDetail(undefined)).toBe(undefined);
+  });
+});
+
+// ============================================================
+// POST /garmin/splits TESTS
+// ============================================================
+
+const FAKE_SPLITS_RESPONSE = {
+  activityId: 21656174532,
+  lapDTOs: [
+    {
+      startTimeGMT: "2026-01-25T06:08:30.0",
+      startLatitude: 31.768,
+      startLongitude: 35.201,
+      distance: 1000,
+      duration: 361.547,
+      movingDuration: 361.547,
+      elapsedDuration: 474.874,
+      elevationGain: 22,
+      elevationLoss: 2,
+      maxElevation: 750.4,
+      minElevation: 727.6,
+      averageSpeed: 2.766,
+      averageMovingSpeed: 2.766,
+      maxSpeed: 3.191,
+      calories: 73,
+      bmrCalories: 9,
+      averageHR: 119,
+      maxHR: 141,
+      averageRunCadence: 165.89,
+      maxRunCadence: 182,
+      averagePower: 344,
+      maxPower: 405,
+      minPower: 0,
+      normalizedPower: 350,
+      totalWork: 29.83,
+      groundContactTime: 267.8,
+      strideLength: 99.46,
+      verticalOscillation: 8.54,
+      verticalRatio: 8.63,
+      endLatitude: 31.772,
+      endLongitude: 35.208,
+      maxVerticalSpeed: 0.4,
+      avgGradeAdjustedSpeed: 2.946,
+      lapIndex: 1,
+      lengthDTOs: [],
+      connectIQMeasurement: [],
+      intensityType: "INTERVAL",
+      messageIndex: 0,
+    },
+    {
+      startTimeGMT: "2026-01-25T06:16:26.0",
+      startLatitude: 31.772,
+      startLongitude: 35.208,
+      distance: 1000,
+      duration: 348.731,
+      movingDuration: 345,
+      elapsedDuration: 702.621,
+      elevationGain: 23,
+      elevationLoss: 3,
+      maxElevation: 771.8,
+      minElevation: 750.4,
+      averageSpeed: 2.868,
+      averageMovingSpeed: 2.899,
+      maxSpeed: 3.406,
+      calories: 73,
+      bmrCalories: 8,
+      averageHR: 126,
+      maxHR: 144,
+      averageRunCadence: 159.05,
+      maxRunCadence: 171,
+      averagePower: 351,
+      maxPower: 448,
+      minPower: 0,
+      normalizedPower: 351,
+      totalWork: 29.36,
+      groundContactTime: 275.4,
+      strideLength: 105.41,
+      verticalOscillation: 9.2,
+      verticalRatio: 8.73,
+      endLatitude: 31.780,
+      endLongitude: 35.208,
+      maxVerticalSpeed: 0.2,
+      avgGradeAdjustedSpeed: 2.981,
+      lapIndex: 2,
+      lengthDTOs: [],
+      connectIQMeasurement: [],
+      intensityType: "INTERVAL",
+      messageIndex: 1,
+    },
+  ],
+  eventDTOs: [
+    {
+      startTimeGMT: "2026-01-25T06:08:29.0",
+      startTimeGMTDoubleValue: 1769321309000,
+      sectionTypeDTO: { id: 4, key: "timerTrigger", sectionTypeKey: "TIMER_TRIGGER" },
+    },
+  ],
+};
+
+describe("POST /garmin/splits", () => {
+  beforeEach(() => {
+    mockGet.mockResolvedValue(FAKE_SPLITS_RESPONSE);
+  });
+
+  // --- Basic fetch by ID ---
+
+  it("returns full splits by activityId (default profile)", async () => {
+    const res = await request(app)
+      .post("/garmin/splits")
+      .set(auth())
+      .send({ username: "u", tokenJson: FAKE_TOKEN, activityId: 21656174532 });
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.profile).toBe("full");
+    expect(res.body.activityId).toBe(21656174532);
+    expect(res.body.lapCount).toBe(2);
+    expect(res.body.laps).toHaveLength(2);
+    // Full profile includes all fields
+    expect(res.body.laps[0].lapIndex).toBe(1);
+    expect(res.body.laps[0].distance).toBe(1000);
+    expect(res.body.laps[0].averagePower).toBe(344);
+    expect(res.body.laps[0].startLatitude).toBe(31.768);
+    expect(res.body.laps[0].groundContactTime).toBe(267.8);
+    expect(res.body.laps[0].intensityType).toBe("INTERVAL");
+    // Calls correct Garmin API URL
+    expect(mockGet).toHaveBeenCalledWith(
+      "https://connectapi.garmin.com/activity-service/activity/21656174532/splits"
+    );
+  });
+
+  it("accepts string activityId", async () => {
+    const res = await request(app)
+      .post("/garmin/splits")
+      .set(auth())
+      .send({ username: "u", tokenJson: FAKE_TOKEN, activityId: "21656174532" });
+    expect(res.status).toBe(200);
+    expect(mockGet).toHaveBeenCalledWith(
+      "https://connectapi.garmin.com/activity-service/activity/21656174532/splits"
+    );
+  });
+
+  it("returns refreshed tokens", async () => {
+    const res = await request(app)
+      .post("/garmin/splits")
+      .set(auth())
+      .send({ username: "u", tokenJson: FAKE_TOKEN, activityId: 100 });
+    expect(res.body.tokenJson).toEqual(REFRESHED_TOKEN);
+  });
+
+  // --- Profile filtering ---
+
+  it("returns only summary fields with profile=summary", async () => {
+    const res = await request(app)
+      .post("/garmin/splits")
+      .set(auth())
+      .send({ username: "u", tokenJson: FAKE_TOKEN, activityId: 100, profile: "summary" });
+    expect(res.status).toBe(200);
+    expect(res.body.profile).toBe("summary");
+    const lap = res.body.laps[0];
+    const keys = Object.keys(lap);
+    // Every key should be in the summary list
+    for (const key of keys) {
+      expect(SPLIT_SUMMARY_FIELDS).toContain(key);
+    }
+    // Core summary fields present
+    expect(lap.lapIndex).toBe(1);
+    expect(lap.distance).toBe(1000);
+    expect(lap.duration).toBeDefined();
+    expect(lap.averageHR).toBe(119);
+    expect(lap.elevationGain).toBe(22);
+    expect(lap.intensityType).toBe("INTERVAL");
+    // Coaching/full-only fields excluded
+    expect(lap.averagePower).toBeUndefined();
+    expect(lap.groundContactTime).toBeUndefined();
+    expect(lap.strideLength).toBeUndefined();
+    expect(lap.startLatitude).toBeUndefined();
+  });
+
+  it("returns coaching fields with profile=coaching", async () => {
+    const res = await request(app)
+      .post("/garmin/splits")
+      .set(auth())
+      .send({ username: "u", tokenJson: FAKE_TOKEN, activityId: 100, profile: "coaching" });
+    expect(res.status).toBe(200);
+    expect(res.body.profile).toBe("coaching");
+    const lap = res.body.laps[0];
+    const keys = Object.keys(lap);
+    for (const key of keys) {
+      expect(SPLIT_COACHING_FIELDS).toContain(key);
+    }
+    // Has coaching-level fields
+    expect(lap.averagePower).toBe(344);
+    expect(lap.normalizedPower).toBe(350);
+    expect(lap.groundContactTime).toBe(267.8);
+    expect(lap.strideLength).toBe(99.46);
+    expect(lap.verticalOscillation).toBe(8.54);
+    expect(lap.avgGradeAdjustedSpeed).toBe(2.946);
+    // But not GPS coords (full-only)
+    expect(lap.startLatitude).toBeUndefined();
+    expect(lap.endLatitude).toBeUndefined();
+    expect(lap.lengthDTOs).toBeUndefined();
+  });
+
+  it("returns all fields with profile=full", async () => {
+    const res = await request(app)
+      .post("/garmin/splits")
+      .set(auth())
+      .send({ username: "u", tokenJson: FAKE_TOKEN, activityId: 100, profile: "full" });
+    expect(res.status).toBe(200);
+    expect(res.body.profile).toBe("full");
+    const lap = res.body.laps[0];
+    // Full includes everything
+    expect(lap.startLatitude).toBe(31.768);
+    expect(lap.endLatitude).toBe(31.772);
+    expect(lap.averagePower).toBe(344);
+    expect(lap.groundContactTime).toBe(267.8);
+    expect(lap.lengthDTOs).toEqual([]);
+  });
+
+  it("rejects invalid profile value", async () => {
+    const res = await request(app)
+      .post("/garmin/splits")
+      .set(auth())
+      .send({ username: "u", tokenJson: FAKE_TOKEN, activityId: 100, profile: "xyz" });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/Invalid profile/);
+  });
+
+  // --- Most recent activity (no activityId) ---
+
+  it("fetches most recent activity splits when activityId is omitted", async () => {
+    mockGetActivities.mockResolvedValue([{ activityId: 77 }]);
+    const res = await request(app)
+      .post("/garmin/splits")
+      .set(auth())
+      .send({ username: "u", tokenJson: FAKE_TOKEN });
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(mockGetActivities).toHaveBeenCalledWith(0, 1);
+    expect(mockGet).toHaveBeenCalledWith(
+      "https://connectapi.garmin.com/activity-service/activity/77/splits"
+    );
+  });
+
+  it("does not call getActivities when activityId is provided", async () => {
+    const res = await request(app)
+      .post("/garmin/splits")
+      .set(auth())
+      .send({ username: "u", tokenJson: FAKE_TOKEN, activityId: 100 });
+    expect(res.status).toBe(200);
+    expect(mockGetActivities).not.toHaveBeenCalled();
+  });
+
+  it("returns 500 when user has no activities and activityId omitted", async () => {
+    mockGetActivities.mockResolvedValue([]);
+    const res = await request(app)
+      .post("/garmin/splits")
+      .set(auth())
+      .send({ username: "u", tokenJson: FAKE_TOKEN });
+    expect(res.status).toBe(500);
+    expect(res.body.ok).toBe(false);
+  });
+
+  it("supports profile with most-recent fetch", async () => {
+    mockGetActivities.mockResolvedValue([{ activityId: 77 }]);
+    const res = await request(app)
+      .post("/garmin/splits")
+      .set(auth())
+      .send({ username: "u", tokenJson: FAKE_TOKEN, profile: "summary" });
+    expect(res.status).toBe(200);
+    expect(res.body.profile).toBe("summary");
+    expect(res.body.laps[0].averagePower).toBeUndefined();
+  });
+
+  // --- Validation ---
+
+  it("returns 400 for invalid activityId", async () => {
+    const res = await request(app)
+      .post("/garmin/splits")
+      .set(auth())
+      .send({ username: "u", tokenJson: FAKE_TOKEN, activityId: "abc" });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/activityId/i);
+  });
+
+  it("returns 400 when missing username", async () => {
+    const res = await request(app)
+      .post("/garmin/splits")
+      .set(auth())
+      .send({ tokenJson: FAKE_TOKEN, activityId: 1 });
+    expect(res.status).toBe(400);
+  });
+
+  it("returns 400 when missing tokenJson", async () => {
+    const res = await request(app)
+      .post("/garmin/splits")
+      .set(auth())
+      .send({ username: "u", activityId: 1 });
+    expect(res.status).toBe(400);
+  });
+
+  // --- Error handling ---
+
+  it("returns 401 on token-related errors", async () => {
+    mockGet.mockRejectedValue(new Error("Session expired"));
+    const res = await request(app)
+      .post("/garmin/splits")
+      .set(auth())
+      .send({ username: "u", tokenJson: FAKE_TOKEN, activityId: 1 });
+    expect(res.status).toBe(401);
+    expect(res.body.error).toMatch(/Re-authenticate/);
+  });
+
+  it("returns 500 for non-token Garmin errors", async () => {
+    mockGet.mockRejectedValue(new Error("Server error"));
+    const res = await request(app)
+      .post("/garmin/splits")
+      .set(auth())
+      .send({ username: "u", tokenJson: FAKE_TOKEN, activityId: 1 });
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBe("Garmin request failed");
+  });
+
+  // --- Edge cases ---
+
+  it("handles empty lapDTOs array", async () => {
+    mockGet.mockResolvedValue({ activityId: 100, lapDTOs: [], eventDTOs: [] });
+    const res = await request(app)
+      .post("/garmin/splits")
+      .set(auth())
+      .send({ username: "u", tokenJson: FAKE_TOKEN, activityId: 100 });
+    expect(res.status).toBe(200);
+    expect(res.body.laps).toEqual([]);
+    expect(res.body.lapCount).toBe(0);
+  });
+
+  it("handles missing lapDTOs gracefully", async () => {
+    mockGet.mockResolvedValue({ activityId: 100 });
+    const res = await request(app)
+      .post("/garmin/splits")
+      .set(auth())
+      .send({ username: "u", tokenJson: FAKE_TOKEN, activityId: 100 });
+    expect(res.status).toBe(200);
+    expect(res.body.laps).toEqual([]);
+    expect(res.body.lapCount).toBe(0);
+  });
+
+  it("preserves lap ordering from Garmin", async () => {
+    const res = await request(app)
+      .post("/garmin/splits")
+      .set(auth())
+      .send({ username: "u", tokenJson: FAKE_TOKEN, activityId: 100 });
+    expect(res.status).toBe(200);
+    expect(res.body.laps[0].lapIndex).toBe(1);
+    expect(res.body.laps[1].lapIndex).toBe(2);
+  });
+
+  it("filters each lap independently with profile", async () => {
+    const res = await request(app)
+      .post("/garmin/splits")
+      .set(auth())
+      .send({ username: "u", tokenJson: FAKE_TOKEN, activityId: 100, profile: "summary" });
+    expect(res.status).toBe(200);
+    // Both laps should be filtered the same way
+    for (const lap of res.body.laps) {
+      const keys = Object.keys(lap);
+      for (const key of keys) {
+        expect(SPLIT_SUMMARY_FIELDS).toContain(key);
+      }
+    }
   });
 });
 

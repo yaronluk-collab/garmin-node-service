@@ -523,6 +523,341 @@ function buildWorkoutResponse(flat, laps) {
 }
 
 // --------------------
+// Workout creation: translation helpers
+// --------------------
+const SPORT_TYPE_MAP = {
+  running:  { sportTypeId: 1, sportTypeKey: "running" },
+  cycling:  { sportTypeId: 2, sportTypeKey: "cycling" },
+  swimming: { sportTypeId: 4, sportTypeKey: "swimming" },
+  strength: { sportTypeId: 5, sportTypeKey: "strength_training" },
+  cardio:   { sportTypeId: 6, sportTypeKey: "cardio_training" },
+};
+
+const STEP_TYPE_MAP = {
+  warmup:   { stepTypeId: 1, stepTypeKey: "warmup", displayOrder: 1 },
+  interval: { stepTypeId: 3, stepTypeKey: "interval", displayOrder: 3 },
+  recovery: { stepTypeId: 4, stepTypeKey: "recovery", displayOrder: 4 },
+  rest:     { stepTypeId: 5, stepTypeKey: "rest", displayOrder: 5 },
+  cooldown: { stepTypeId: 2, stepTypeKey: "cooldown", displayOrder: 2 },
+  other:    { stepTypeId: 7, stepTypeKey: "other", displayOrder: 7 },
+};
+
+function parsePaceToMps(paceStr) {
+  // "5:30" → 5 min 30 sec per km → 330 sec/km → 1000/330 m/s
+  const parts = paceStr.split(":");
+  if (parts.length !== 2) return null;
+  const mins = Number(parts[0]);
+  const secs = Number(parts[1]);
+  if (!Number.isFinite(mins) || !Number.isFinite(secs) || mins < 0 || secs < 0) return null;
+  const totalSec = mins * 60 + secs;
+  if (totalSec <= 0) return null;
+  return 1000 / totalSec;
+}
+
+function buildGarminSportType(sport) {
+  return SPORT_TYPE_MAP[sport] || null;
+}
+
+function buildGarminDuration(duration) {
+  if (!duration || !duration.type) return null;
+  switch (duration.type) {
+    case "time":
+      return {
+        endCondition: { conditionTypeId: 2, conditionTypeKey: "time", displayable: true, displayOrder: 1 },
+        endConditionValue: duration.seconds,
+        endConditionCompare: null,
+        endConditionZone: null,
+        preferredEndConditionUnit: null,
+      };
+    case "distance":
+      return {
+        endCondition: { conditionTypeId: 3, conditionTypeKey: "distance", displayable: true, displayOrder: 3 },
+        endConditionValue: duration.meters,
+        endConditionCompare: null,
+        preferredEndConditionUnit: { unitKey: "kilometer" },
+      };
+    case "calories":
+      return {
+        endCondition: { conditionTypeId: 4, conditionTypeKey: "calories", displayable: true, displayOrder: 4 },
+        endConditionValue: duration.calories,
+        endConditionCompare: null,
+        preferredEndConditionUnit: null,
+      };
+    case "lapButton":
+      return {
+        endCondition: { conditionTypeId: 1, conditionTypeKey: "lap.button", displayable: true, displayOrder: 1 },
+        endConditionValue: null,
+        endConditionCompare: null,
+        preferredEndConditionUnit: null,
+      };
+    case "heartRate":
+      return {
+        endCondition: { conditionTypeId: 6, conditionTypeKey: "heart.rate", displayable: true, displayOrder: 6 },
+        endConditionValue: duration.bpm,
+        endConditionCompare: duration.comparison || "gt",
+        preferredEndConditionUnit: null,
+      };
+    default:
+      return null;
+  }
+}
+
+function buildGarminTarget(target) {
+  if (!target || !target.type) return { targetType: { workoutTargetTypeId: 1, workoutTargetTypeKey: "no.target", displayOrder: 1 } };
+  switch (target.type) {
+    case "none":
+      return {
+        targetType: { workoutTargetTypeId: 1, workoutTargetTypeKey: "no.target", displayOrder: 1 },
+      };
+    case "pace": {
+      const minMps = parsePaceToMps(target.minPerKm);
+      const maxMps = parsePaceToMps(target.maxPerKm);
+      if (!minMps || !maxMps) return null;
+      return {
+        targetType: { workoutTargetTypeId: 6, workoutTargetTypeKey: "pace.zone", displayOrder: 6 },
+        targetValueOne: minMps,
+        targetValueTwo: maxMps,
+        targetValueUnit: null,
+      };
+    }
+    case "heartRateZone":
+      return {
+        targetType: { workoutTargetTypeId: 4, workoutTargetTypeKey: "heart.rate.zone", displayOrder: 4 },
+        zoneNumber: target.zone,
+      };
+    case "heartRate":
+      return {
+        targetType: { workoutTargetTypeId: 4, workoutTargetTypeKey: "heart.rate.zone", displayOrder: 4 },
+        targetValueOne: target.min,
+        targetValueTwo: target.max,
+        targetValueUnit: null,
+      };
+    case "powerZone":
+      return {
+        targetType: { workoutTargetTypeId: 2, workoutTargetTypeKey: "power.zone", displayOrder: 2 },
+        zoneNumber: target.zone,
+      };
+    case "power":
+      return {
+        targetType: { workoutTargetTypeId: 2, workoutTargetTypeKey: "power.zone", displayOrder: 2 },
+        targetValueOne: target.min,
+        targetValueTwo: target.max,
+      };
+    case "cadence":
+      return {
+        targetType: { workoutTargetTypeId: 3, workoutTargetTypeKey: "cadence", displayOrder: 3 },
+        targetValueOne: target.min,
+        targetValueTwo: target.max,
+        targetValueUnit: null,
+      };
+    default:
+      return null;
+  }
+}
+
+function buildGarminStep(step, stepId) {
+  const stepType = STEP_TYPE_MAP[step.type];
+  if (!stepType) return null;
+  const duration = buildGarminDuration(step.duration);
+  if (!duration) return null;
+  const target = buildGarminTarget(step.target);
+  if (!target) return null;
+
+  return {
+    type: "ExecutableStepDTO",
+    stepId,
+    stepOrder: stepId,
+    childStepId: null,
+    description: step.notes || null,
+    stepType,
+    ...duration,
+    ...target,
+    targetValueOne: target.targetValueOne ?? null,
+    targetValueTwo: target.targetValueTwo ?? null,
+    targetValueUnit: target.targetValueUnit ?? null,
+    zoneNumber: target.zoneNumber ?? null,
+    secondaryTargetType: null,
+    secondaryTargetValueOne: null,
+    secondaryTargetValueTwo: null,
+    secondaryTargetValueUnit: null,
+    secondaryZoneNumber: null,
+    strokeType: {},
+    equipmentType: { displayOrder: null, equipmentTypeId: null, equipmentTypeKey: null },
+    exerciseName: null,
+    category: null,
+    workoutProvider: null,
+    providerExerciseSourceId: null,
+    weightValue: null,
+    weightUnit: null,
+    stepAudioNote: null,
+  };
+}
+
+function buildGarminRepeatGroup(step, stepId) {
+  const childSteps = [];
+  let childId = stepId + 1;
+  for (const childStep of step.steps) {
+    const built = buildGarminStep(childStep, childId);
+    if (!built) return null;
+    childSteps.push(built);
+    childId++;
+  }
+
+  return {
+    type: "RepeatGroupDTO",
+    stepId,
+    stepOrder: stepId,
+    childStepId: null,
+    stepType: { stepTypeId: 6, stepTypeKey: "repeat", displayOrder: 6 },
+    numberOfIterations: step.iterations,
+    workoutSteps: childSteps,
+    // Total IDs consumed: 1 (group) + childSteps.length
+    _nextId: childId,
+  };
+}
+
+function buildGarminWorkout(workout) {
+  const sportType = buildGarminSportType(workout.sport);
+  const steps = [];
+  let stepId = 1;
+
+  for (const step of workout.steps) {
+    if (step.type === "repeat") {
+      const group = buildGarminRepeatGroup(step, stepId);
+      if (!group) return null;
+      stepId = group._nextId;
+      const { _nextId, ...cleanGroup } = group;
+      steps.push(cleanGroup);
+    } else {
+      const built = buildGarminStep(step, stepId);
+      if (!built) return null;
+      steps.push(built);
+      stepId++;
+    }
+  }
+
+  return {
+    sportType,
+    subSportType: null,
+    workoutName: workout.name,
+    description: workout.description || null,
+    workoutSegments: [{
+      segmentOrder: 1,
+      sportType,
+      workoutSteps: steps,
+    }],
+    estimatedDurationInSecs: 0,
+    estimatedDistanceInMeters: 0,
+    estimateType: null,
+    avgTrainingSpeed: null,
+    estimatedDistanceUnit: { unitKey: null },
+    isWheelchair: false,
+  };
+}
+
+const VALID_SPORTS = new Set(Object.keys(SPORT_TYPE_MAP));
+const VALID_STEP_TYPES = new Set([...Object.keys(STEP_TYPE_MAP), "repeat"]);
+const VALID_DURATION_TYPES = new Set(["time", "distance", "calories", "lapButton", "heartRate"]);
+const VALID_TARGET_TYPES = new Set(["none", "pace", "heartRateZone", "heartRate", "powerZone", "power", "cadence"]);
+
+function validateWorkoutStep(step, allowRepeat) {
+  if (!step || typeof step !== "object") return "Each step must be an object";
+  if (!VALID_STEP_TYPES.has(step.type)) {
+    return `Invalid step type "${step.type}". Must be one of: ${[...VALID_STEP_TYPES].join(", ")}`;
+  }
+
+  if (step.type === "repeat") {
+    if (!allowRepeat) return "Nested repeats are not allowed";
+    if (!Number.isFinite(step.iterations) || step.iterations < 1) {
+      return "Repeat iterations must be a positive integer";
+    }
+    if (!Array.isArray(step.steps) || step.steps.length === 0) {
+      return "Repeat must contain at least one step";
+    }
+    for (const child of step.steps) {
+      const err = validateWorkoutStep(child, false);
+      if (err) return err;
+    }
+    return null;
+  }
+
+  // Regular step
+  if (!step.duration || !VALID_DURATION_TYPES.has(step.duration.type)) {
+    return `Invalid duration type. Must be one of: ${[...VALID_DURATION_TYPES].join(", ")}`;
+  }
+  if (step.duration.type === "time" && (!Number.isFinite(step.duration.seconds) || step.duration.seconds <= 0)) {
+    return "Time duration requires a positive seconds value";
+  }
+  if (step.duration.type === "distance" && (!Number.isFinite(step.duration.meters) || step.duration.meters <= 0)) {
+    return "Distance duration requires a positive meters value";
+  }
+  if (step.duration.type === "calories" && (!Number.isFinite(step.duration.calories) || step.duration.calories <= 0)) {
+    return "Calories duration requires a positive calories value";
+  }
+  if (step.duration.type === "heartRate") {
+    if (!Number.isFinite(step.duration.bpm) || step.duration.bpm <= 0) {
+      return "Heart rate duration requires a positive bpm value";
+    }
+    if (step.duration.comparison && step.duration.comparison !== "gt" && step.duration.comparison !== "lt") {
+      return 'Heart rate duration comparison must be "gt" or "lt"';
+    }
+  }
+
+  if (!step.target || !VALID_TARGET_TYPES.has(step.target.type)) {
+    return `Invalid target type. Must be one of: ${[...VALID_TARGET_TYPES].join(", ")}`;
+  }
+  if (step.target.type === "pace") {
+    if (!parsePaceToMps(step.target.minPerKm || "")) return "Pace target requires valid minPerKm (e.g. \"5:30\")";
+    if (!parsePaceToMps(step.target.maxPerKm || "")) return "Pace target requires valid maxPerKm (e.g. \"5:00\")";
+  }
+  if (step.target.type === "heartRateZone") {
+    if (!Number.isFinite(step.target.zone) || step.target.zone < 1 || step.target.zone > 5) {
+      return "Heart rate zone must be 1-5";
+    }
+  }
+  if (step.target.type === "heartRate") {
+    if (!Number.isFinite(step.target.min) || !Number.isFinite(step.target.max)) {
+      return "Heart rate target requires min and max BPM values";
+    }
+  }
+  if (step.target.type === "powerZone") {
+    if (!Number.isFinite(step.target.zone) || step.target.zone < 1) {
+      return "Power zone must be a positive integer";
+    }
+  }
+  if (step.target.type === "power") {
+    if (!Number.isFinite(step.target.min) || !Number.isFinite(step.target.max)) {
+      return "Power target requires min and max watt values";
+    }
+  }
+  if (step.target.type === "cadence") {
+    if (!Number.isFinite(step.target.min) || !Number.isFinite(step.target.max)) {
+      return "Cadence target requires min and max values";
+    }
+  }
+
+  return null;
+}
+
+function validateWorkoutPayload(workout) {
+  if (!workout || typeof workout !== "object") return { ok: false, error: "Missing workout object" };
+  if (!workout.name || typeof workout.name !== "string" || !workout.name.trim()) {
+    return { ok: false, error: "Workout name is required" };
+  }
+  if (!VALID_SPORTS.has(workout.sport)) {
+    return { ok: false, error: `Invalid sport "${workout.sport}". Must be one of: ${[...VALID_SPORTS].join(", ")}` };
+  }
+  if (!Array.isArray(workout.steps) || workout.steps.length === 0) {
+    return { ok: false, error: "Workout must contain at least one step" };
+  }
+  for (let i = 0; i < workout.steps.length; i++) {
+    const err = validateWorkoutStep(workout.steps[i], true);
+    if (err) return { ok: false, error: `Step ${i + 1}: ${err}` };
+  }
+  return { ok: true };
+}
+
+// --------------------
 // Health + Debug routes
 // --------------------
 app.get("/health", (req, res) => res.json({ ok: true }));
@@ -887,6 +1222,49 @@ app.post("/garmin/workout", requireApiKey, (req, res) => {
 });
 
 // --------------------
+// Garmin: CREATE WORKOUT
+// Body: { username/email, tokenJson, workout: { name, sport, steps[] }, scheduleDate? }
+// --------------------
+app.post("/garmin/workout/create", requireApiKey, (req, res) => {
+  const { workout, scheduleDate } = req.body || {};
+
+  const validation = validateWorkoutPayload(workout);
+  if (!validation.ok) {
+    return res.status(400).json({ ok: false, error: validation.error });
+  }
+
+  if (scheduleDate !== undefined && scheduleDate !== null) {
+    if (typeof scheduleDate !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(scheduleDate)) {
+      return res.status(400).json({ ok: false, error: "scheduleDate must be YYYY-MM-DD format" });
+    }
+  }
+
+  return withGarminToken(req, res, async (client) => {
+    const garminWorkout = buildGarminWorkout(workout);
+    const created = await withTimeout(
+      client.createWorkout(garminWorkout),
+      GARMIN_API_TIMEOUT_MS
+    );
+
+    const result = {
+      workoutId: created.workoutId,
+      workoutName: created.workoutName,
+    };
+
+    if (scheduleDate && created.workoutId) {
+      await withTimeout(
+        client.scheduleWorkout({ workoutId: String(created.workoutId) }, scheduleDate),
+        GARMIN_API_TIMEOUT_MS
+      );
+      result.scheduled = true;
+      result.scheduleDate = scheduleDate;
+    }
+
+    return result;
+  });
+});
+
+// --------------------
 // Start server
 // --------------------
 // Export app and helpers for testing; only start listener when run directly
@@ -923,6 +1301,17 @@ export {
   WORKOUT_BODY_FIELDS,
   WORKOUT_META_FIELDS,
   WORKOUT_LAP_FIELDS,
+  SPORT_TYPE_MAP,
+  STEP_TYPE_MAP,
+  parsePaceToMps,
+  buildGarminSportType,
+  buildGarminDuration,
+  buildGarminTarget,
+  buildGarminStep,
+  buildGarminRepeatGroup,
+  buildGarminWorkout,
+  validateWorkoutPayload,
+  validateWorkoutStep,
 };
 
 if (process.argv[1] && import.meta.url.endsWith(process.argv[1].replace(/^.*[\\/]/, ""))) {

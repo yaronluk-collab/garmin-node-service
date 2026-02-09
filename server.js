@@ -6,6 +6,28 @@ const app = express();
 app.use(express.json());
 
 // --------------------
+// Timeout protection
+// --------------------
+class GarminTimeoutError extends Error {
+  constructor(ms) {
+    super(`Garmin API call timed out after ${ms}ms`);
+    this.name = "GarminTimeoutError";
+  }
+}
+
+function withTimeout(promise, ms) {
+  let timeoutId;
+  const timeout = new Promise((_, reject) => {
+    timeoutId = setTimeout(() => reject(new GarminTimeoutError(ms)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timeoutId));
+}
+
+const GARMIN_LOGIN_TIMEOUT_MS = 15_000;
+const GARMIN_API_TIMEOUT_MS = 10_000;
+const SERVER_TIMEOUT_MS = 25_000;
+
+// --------------------
 // Auth (API key)
 // --------------------
 function requireApiKey(req, res, next) {
@@ -83,6 +105,12 @@ async function withGarminToken(req, res, actionFn) {
     const refreshed = await client.exportToken();
     return res.json({ ok: true, ...result, tokenJson: refreshed });
   } catch (e) {
+    if (e instanceof GarminTimeoutError) {
+      return res.status(504).json({
+        ok: false,
+        error: "Garmin API timed out. Please try again.",
+      });
+    }
     const msg = e?.message || String(e);
     const isTokenError = /token|unauthorized|auth|expired|session|403|401/i.test(msg);
     if (isTokenError) {
@@ -602,7 +630,7 @@ app.post("/debug/garmin-splits", requireApiKey, (req, res) => {
     const results = {};
     for (const url of urls) {
       try {
-        const data = await client.get(url);
+        const data = await withTimeout(client.get(url), GARMIN_API_TIMEOUT_MS);
         results[url] = { ok: true, data };
       } catch (e) {
         results[url] = { ok: false, error: e?.message || String(e) };
@@ -650,12 +678,13 @@ app.post("/garmin/connect", requireApiKey, async (req, res) => {
         await loadTokenIntoClient(client, tokenJson);
 
         // Validate token with 1 cheap Garmin call
-        await client.getUserProfile();
+        await withTimeout(client.getUserProfile(), GARMIN_API_TIMEOUT_MS);
 
         // Always export latest token (may be refreshed/rotated)
         const refreshed = await client.exportToken();
         return res.json({ ok: true, tokenJson: refreshed });
       } catch (e) {
+        if (e instanceof GarminTimeoutError) throw e;
         console.log("Token path failed; will try password login. Reason:", e?.message || e);
       }
     }
@@ -668,12 +697,18 @@ app.post("/garmin/connect", requireApiKey, async (req, res) => {
         error: `Cooldown active. Wait ${Math.ceil(gate.waitMs / 1000)}s before trying password login again.`,
       });
     }
-    await client.login();
+    await withTimeout(client.login(), GARMIN_LOGIN_TIMEOUT_MS);
     markPasswordLoginAttempt(username); // only burn cooldown on successful login
     const exported = await client.exportToken();
     return res.json({ ok: true, tokenJson: exported });
   } catch (err) {
     console.error("Garmin connect error:", err?.message || err);
+    if (err instanceof GarminTimeoutError) {
+      return res.status(504).json({
+        ok: false,
+        error: "Garmin API timed out. Please try again.",
+      });
+    }
     return res.status(500).json({ ok: false, error: err?.message || String(err) });
   }
 });
@@ -684,7 +719,7 @@ app.post("/garmin/connect", requireApiKey, async (req, res) => {
 // --------------------
 app.post("/garmin/profile", requireApiKey, (req, res) =>
   withGarminToken(req, res, async (client) => ({
-    profile: await client.getUserProfile(),
+    profile: await withTimeout(client.getUserProfile(), GARMIN_API_TIMEOUT_MS),
   }))
 );
 
@@ -698,7 +733,7 @@ app.post("/garmin/activities", requireApiKey, (req, res) =>
     const limit = Number.isFinite(n0) ? Math.max(1, Math.min(n0, 50)) : 10;
     const o0 = Number(req.body?.offset ?? 0);
     const offset = Number.isFinite(o0) ? Math.max(0, o0) : 0;
-    return { activities: await client.getActivities(offset, limit) };
+    return { activities: await withTimeout(client.getActivities(offset, limit), GARMIN_API_TIMEOUT_MS) };
   })
 );
 
@@ -734,14 +769,14 @@ app.post("/garmin/activity", requireApiKey, (req, res) => {
 
     // If no activityId provided, fetch the most recent activity
     if (!activityId) {
-      const recent = await client.getActivities(0, 1);
+      const recent = await withTimeout(client.getActivities(0, 1), GARMIN_API_TIMEOUT_MS);
       if (!recent || recent.length === 0) {
         throw new Error("No activities found");
       }
       activityId = recent[0].activityId;
     }
 
-    const raw = await client.getActivity({ activityId });
+    const raw = await withTimeout(client.getActivity({ activityId }), GARMIN_API_TIMEOUT_MS);
     const flat = flattenActivityDetail(raw);
     const fields = PROFILE_FIELDS[profile];
     const activity = fields ? pickFields(flat, fields) : flat;
@@ -781,7 +816,7 @@ app.post("/garmin/splits", requireApiKey, (req, res) => {
 
     // If no activityId provided, fetch the most recent activity
     if (!activityId) {
-      const recent = await client.getActivities(0, 1);
+      const recent = await withTimeout(client.getActivities(0, 1), GARMIN_API_TIMEOUT_MS);
       if (!recent || recent.length === 0) {
         throw new Error("No activities found");
       }
@@ -789,7 +824,7 @@ app.post("/garmin/splits", requireApiKey, (req, res) => {
     }
 
     const url = `https://connectapi.garmin.com/activity-service/activity/${activityId}/splits`;
-    const raw = await client.get(url);
+    const raw = await withTimeout(client.get(url), GARMIN_API_TIMEOUT_MS);
 
     let laps = raw?.lapDTOs || [];
 
@@ -829,7 +864,7 @@ app.post("/garmin/workout", requireApiKey, (req, res) => {
 
     // If no activityId provided, fetch the most recent activity
     if (!activityId) {
-      const recent = await client.getActivities(0, 1);
+      const recent = await withTimeout(client.getActivities(0, 1), GARMIN_API_TIMEOUT_MS);
       if (!recent || recent.length === 0) {
         throw new Error("No activities found");
       }
@@ -839,8 +874,8 @@ app.post("/garmin/workout", requireApiKey, (req, res) => {
     // Parallel fetch: activity detail + splits
     const splitsUrl = `https://connectapi.garmin.com/activity-service/activity/${activityId}/splits`;
     const [rawActivity, rawSplits] = await Promise.all([
-      client.getActivity({ activityId }),
-      client.get(splitsUrl),
+      withTimeout(client.getActivity({ activityId }), GARMIN_API_TIMEOUT_MS),
+      withTimeout(client.get(splitsUrl), GARMIN_API_TIMEOUT_MS),
     ]);
 
     const flat = flattenActivityDetail(rawActivity);
@@ -857,6 +892,11 @@ app.post("/garmin/workout", requireApiKey, (req, res) => {
 // Export app and helpers for testing; only start listener when run directly
 export {
   app,
+  GarminTimeoutError,
+  withTimeout,
+  GARMIN_LOGIN_TIMEOUT_MS,
+  GARMIN_API_TIMEOUT_MS,
+  SERVER_TIMEOUT_MS,
   parseActivityIdFromBody,
   canAttemptPasswordLogin,
   markPasswordLoginAttempt,
@@ -888,5 +928,6 @@ export {
 if (process.argv[1] && import.meta.url.endsWith(process.argv[1].replace(/^.*[\\/]/, ""))) {
   const port = process.env.PORT || 3000;
   const server = app.listen(port, () => console.log("Listening on", port));
+  server.setTimeout(SERVER_TIMEOUT_MS);
   process.on("SIGTERM", () => server.close());
 }

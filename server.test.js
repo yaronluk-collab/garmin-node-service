@@ -11,6 +11,8 @@ const mockGetActivity = vi.fn();
 const mockGet = vi.fn();
 const mockExportToken = vi.fn();
 const mockLoadToken = vi.fn();
+const mockCreateWorkout = vi.fn();
+const mockScheduleWorkout = vi.fn();
 
 vi.mock("@flow-js/garmin-connect", () => {
   class GarminConnect {
@@ -25,6 +27,8 @@ vi.mock("@flow-js/garmin-connect", () => {
     get(...args) { return mockGet(...args); }
     exportToken(...args) { return mockExportToken(...args); }
     loadToken(...args) { return mockLoadToken(...args); }
+    createWorkout(...args) { return mockCreateWorkout(...args); }
+    scheduleWorkout(...args) { return mockScheduleWorkout(...args); }
   }
   return { default: { GarminConnect } };
 });
@@ -61,6 +65,14 @@ const {
   WORKOUT_BODY_FIELDS,
   WORKOUT_META_FIELDS,
   WORKOUT_LAP_FIELDS,
+  parsePaceToMps,
+  buildGarminSportType,
+  buildGarminDuration,
+  buildGarminTarget,
+  buildGarminStep,
+  buildGarminRepeatGroup,
+  buildGarminWorkout,
+  validateWorkoutPayload,
 } = await import("./server.js");
 
 // ---------------------
@@ -142,6 +154,8 @@ beforeEach(() => {
     ],
   });
   mockLogin.mockResolvedValue(undefined);
+  mockCreateWorkout.mockResolvedValue({ workoutId: 99999, workoutName: "Test Workout" });
+  mockScheduleWorkout.mockResolvedValue(undefined);
 });
 
 function auth() {
@@ -1999,5 +2013,604 @@ describe("Timeout handling (504 responses)", () => {
     expect(res.body.error).toMatch(/timed out/i);
     // Should NOT have attempted password login
     expect(mockLogin).not.toHaveBeenCalled();
+  });
+});
+
+// ============================================================
+// WORKOUT CREATION: TRANSLATION HELPERS
+// ============================================================
+
+describe("parsePaceToMps", () => {
+  it("converts 5:00/km to m/s", () => {
+    const mps = parsePaceToMps("5:00");
+    expect(mps).toBeCloseTo(1000 / 300, 5); // 3.333 m/s
+  });
+
+  it("converts 4:30/km to m/s", () => {
+    const mps = parsePaceToMps("4:30");
+    expect(mps).toBeCloseTo(1000 / 270, 5); // 3.703 m/s
+  });
+
+  it("converts 6:15/km to m/s", () => {
+    const mps = parsePaceToMps("6:15");
+    expect(mps).toBeCloseTo(1000 / 375, 5);
+  });
+
+  it("returns null for invalid format", () => {
+    expect(parsePaceToMps("abc")).toBeNull();
+    expect(parsePaceToMps("")).toBeNull();
+    expect(parsePaceToMps("5")).toBeNull();
+    expect(parsePaceToMps("0:00")).toBeNull();
+  });
+});
+
+describe("buildGarminSportType", () => {
+  it("maps running", () => {
+    expect(buildGarminSportType("running")).toEqual({ sportTypeId: 1, sportTypeKey: "running" });
+  });
+
+  it("maps cycling", () => {
+    expect(buildGarminSportType("cycling")).toEqual({ sportTypeId: 2, sportTypeKey: "cycling" });
+  });
+
+  it("maps swimming", () => {
+    expect(buildGarminSportType("swimming")).toEqual({ sportTypeId: 4, sportTypeKey: "swimming" });
+  });
+
+  it("maps strength", () => {
+    expect(buildGarminSportType("strength")).toEqual({ sportTypeId: 5, sportTypeKey: "strength_training" });
+  });
+
+  it("maps cardio", () => {
+    expect(buildGarminSportType("cardio")).toEqual({ sportTypeId: 6, sportTypeKey: "cardio_training" });
+  });
+
+  it("returns null for unknown sport", () => {
+    expect(buildGarminSportType("golf")).toBeNull();
+  });
+});
+
+describe("buildGarminDuration", () => {
+  it("builds time duration", () => {
+    const d = buildGarminDuration({ type: "time", seconds: 300 });
+    expect(d.endCondition.conditionTypeKey).toBe("time");
+    expect(d.endConditionValue).toBe(300);
+  });
+
+  it("builds distance duration", () => {
+    const d = buildGarminDuration({ type: "distance", meters: 1000 });
+    expect(d.endCondition.conditionTypeKey).toBe("distance");
+    expect(d.endConditionValue).toBe(1000);
+    expect(d.preferredEndConditionUnit.unitKey).toBe("kilometer");
+  });
+
+  it("builds calories duration", () => {
+    const d = buildGarminDuration({ type: "calories", calories: 200 });
+    expect(d.endCondition.conditionTypeKey).toBe("calories");
+    expect(d.endConditionValue).toBe(200);
+  });
+
+  it("builds lapButton duration", () => {
+    const d = buildGarminDuration({ type: "lapButton" });
+    expect(d.endCondition.conditionTypeKey).toBe("lap.button");
+    expect(d.endConditionValue).toBeNull();
+  });
+
+  it("builds heartRate duration", () => {
+    const d = buildGarminDuration({ type: "heartRate", bpm: 150, comparison: "gt" });
+    expect(d.endCondition.conditionTypeKey).toBe("heart.rate");
+    expect(d.endConditionValue).toBe(150);
+    expect(d.endConditionCompare).toBe("gt");
+  });
+
+  it("returns null for unknown type", () => {
+    expect(buildGarminDuration({ type: "unknown" })).toBeNull();
+  });
+
+  it("returns null for missing input", () => {
+    expect(buildGarminDuration(null)).toBeNull();
+  });
+});
+
+describe("buildGarminTarget", () => {
+  it("builds no target", () => {
+    const t = buildGarminTarget({ type: "none" });
+    expect(t.targetType.workoutTargetTypeKey).toBe("no.target");
+  });
+
+  it("builds pace target", () => {
+    const t = buildGarminTarget({ type: "pace", minPerKm: "5:30", maxPerKm: "5:00" });
+    expect(t.targetType.workoutTargetTypeKey).toBe("pace.zone");
+    // minPerKm (5:30 = 330s/km) should be slower = smaller m/s
+    expect(t.targetValueOne).toBeCloseTo(1000 / 330, 5);
+    // maxPerKm (5:00 = 300s/km) should be faster = larger m/s
+    expect(t.targetValueTwo).toBeCloseTo(1000 / 300, 5);
+    expect(t.targetValueOne).toBeLessThan(t.targetValueTwo);
+  });
+
+  it("builds heartRateZone target", () => {
+    const t = buildGarminTarget({ type: "heartRateZone", zone: 3 });
+    expect(t.targetType.workoutTargetTypeKey).toBe("heart.rate.zone");
+    expect(t.zoneNumber).toBe(3);
+  });
+
+  it("builds heartRate range target", () => {
+    const t = buildGarminTarget({ type: "heartRate", min: 140, max: 160 });
+    expect(t.targetType.workoutTargetTypeKey).toBe("heart.rate.zone");
+    expect(t.targetValueOne).toBe(140);
+    expect(t.targetValueTwo).toBe(160);
+  });
+
+  it("builds powerZone target", () => {
+    const t = buildGarminTarget({ type: "powerZone", zone: 3 });
+    expect(t.targetType.workoutTargetTypeKey).toBe("power.zone");
+    expect(t.zoneNumber).toBe(3);
+  });
+
+  it("builds power range target", () => {
+    const t = buildGarminTarget({ type: "power", min: 230, max: 270 });
+    expect(t.targetType.workoutTargetTypeKey).toBe("power.zone");
+    expect(t.targetValueOne).toBe(230);
+    expect(t.targetValueTwo).toBe(270);
+  });
+
+  it("builds cadence target", () => {
+    const t = buildGarminTarget({ type: "cadence", min: 170, max: 180 });
+    expect(t.targetType.workoutTargetTypeKey).toBe("cadence");
+    expect(t.targetValueOne).toBe(170);
+    expect(t.targetValueTwo).toBe(180);
+  });
+
+  it("returns null for invalid pace", () => {
+    expect(buildGarminTarget({ type: "pace", minPerKm: "bad", maxPerKm: "5:00" })).toBeNull();
+  });
+
+  it("returns no target for missing input", () => {
+    const t = buildGarminTarget(null);
+    expect(t.targetType.workoutTargetTypeKey).toBe("no.target");
+  });
+});
+
+describe("buildGarminStep", () => {
+  it("builds a complete ExecutableStepDTO", () => {
+    const step = buildGarminStep({
+      type: "interval",
+      duration: { type: "distance", meters: 800 },
+      target: { type: "pace", minPerKm: "4:30", maxPerKm: "4:00" },
+      notes: "Fast!",
+    }, 1);
+    expect(step.type).toBe("ExecutableStepDTO");
+    expect(step.stepId).toBe(1);
+    expect(step.stepOrder).toBe(1);
+    expect(step.stepType.stepTypeKey).toBe("interval");
+    expect(step.endCondition.conditionTypeKey).toBe("distance");
+    expect(step.endConditionValue).toBe(800);
+    expect(step.targetType.workoutTargetTypeKey).toBe("pace.zone");
+    expect(step.description).toBe("Fast!");
+    expect(step.secondaryTargetType).toBeNull();
+  });
+
+  it("returns null for invalid step type", () => {
+    expect(buildGarminStep({ type: "invalid", duration: { type: "time", seconds: 60 }, target: { type: "none" } }, 1)).toBeNull();
+  });
+
+  it("returns null for invalid duration", () => {
+    expect(buildGarminStep({ type: "warmup", duration: { type: "bad" }, target: { type: "none" } }, 1)).toBeNull();
+  });
+});
+
+describe("buildGarminRepeatGroup", () => {
+  it("builds a RepeatGroupDTO with child steps", () => {
+    const group = buildGarminRepeatGroup({
+      type: "repeat",
+      iterations: 4,
+      steps: [
+        { type: "interval", duration: { type: "distance", meters: 800 }, target: { type: "none" } },
+        { type: "recovery", duration: { type: "time", seconds: 90 }, target: { type: "none" } },
+      ],
+    }, 3);
+    expect(group.type).toBe("RepeatGroupDTO");
+    expect(group.stepId).toBe(3);
+    expect(group.stepType.stepTypeKey).toBe("repeat");
+    expect(group.numberOfIterations).toBe(4);
+    expect(group.workoutSteps).toHaveLength(2);
+    expect(group.workoutSteps[0].stepId).toBe(4);
+    expect(group.workoutSteps[0].type).toBe("ExecutableStepDTO");
+    expect(group.workoutSteps[1].stepId).toBe(5);
+    expect(group._nextId).toBe(6);
+  });
+
+  it("returns null if child step is invalid", () => {
+    expect(buildGarminRepeatGroup({
+      type: "repeat",
+      iterations: 2,
+      steps: [{ type: "bad", duration: { type: "time", seconds: 60 }, target: { type: "none" } }],
+    }, 1)).toBeNull();
+  });
+});
+
+describe("buildGarminWorkout", () => {
+  it("builds a full workout with warmup + repeat + cooldown", () => {
+    const result = buildGarminWorkout({
+      name: "Test Workout",
+      description: "A test",
+      sport: "running",
+      steps: [
+        { type: "warmup", duration: { type: "time", seconds: 600 }, target: { type: "none" } },
+        {
+          type: "repeat", iterations: 3,
+          steps: [
+            { type: "interval", duration: { type: "distance", meters: 1000 }, target: { type: "pace", minPerKm: "5:00", maxPerKm: "4:30" } },
+            { type: "recovery", duration: { type: "time", seconds: 90 }, target: { type: "none" } },
+          ],
+        },
+        { type: "cooldown", duration: { type: "lapButton" }, target: { type: "none" } },
+      ],
+    });
+    expect(result.workoutName).toBe("Test Workout");
+    expect(result.description).toBe("A test");
+    expect(result.sportType.sportTypeKey).toBe("running");
+    expect(result.workoutSegments).toHaveLength(1);
+    const steps = result.workoutSegments[0].workoutSteps;
+    expect(steps).toHaveLength(3);
+    // Warmup
+    expect(steps[0].type).toBe("ExecutableStepDTO");
+    expect(steps[0].stepId).toBe(1);
+    expect(steps[0].stepType.stepTypeKey).toBe("warmup");
+    // Repeat group
+    expect(steps[1].type).toBe("RepeatGroupDTO");
+    expect(steps[1].stepId).toBe(2);
+    expect(steps[1].numberOfIterations).toBe(3);
+    expect(steps[1].workoutSteps).toHaveLength(2);
+    expect(steps[1].workoutSteps[0].stepId).toBe(3);
+    expect(steps[1].workoutSteps[1].stepId).toBe(4);
+    // _nextId should be stripped
+    expect(steps[1]._nextId).toBeUndefined();
+    // Cooldown
+    expect(steps[2].type).toBe("ExecutableStepDTO");
+    expect(steps[2].stepId).toBe(5);
+    expect(steps[2].stepType.stepTypeKey).toBe("cooldown");
+  });
+
+  it("handles flat steps without repeats", () => {
+    const result = buildGarminWorkout({
+      name: "Easy Run",
+      sport: "running",
+      steps: [
+        { type: "warmup", duration: { type: "time", seconds: 300 }, target: { type: "none" } },
+        { type: "interval", duration: { type: "time", seconds: 1800 }, target: { type: "heartRateZone", zone: 2 } },
+        { type: "cooldown", duration: { type: "time", seconds: 300 }, target: { type: "none" } },
+      ],
+    });
+    const steps = result.workoutSegments[0].workoutSteps;
+    expect(steps).toHaveLength(3);
+    expect(steps[0].stepId).toBe(1);
+    expect(steps[1].stepId).toBe(2);
+    expect(steps[2].stepId).toBe(3);
+  });
+});
+
+// ============================================================
+// WORKOUT VALIDATION TESTS
+// ============================================================
+
+describe("validateWorkoutPayload", () => {
+  const validWorkout = {
+    name: "Test",
+    sport: "running",
+    steps: [
+      { type: "warmup", duration: { type: "time", seconds: 300 }, target: { type: "none" } },
+    ],
+  };
+
+  it("accepts a valid workout", () => {
+    expect(validateWorkoutPayload(validWorkout).ok).toBe(true);
+  });
+
+  it("rejects missing workout", () => {
+    expect(validateWorkoutPayload(null).ok).toBe(false);
+  });
+
+  it("rejects missing name", () => {
+    expect(validateWorkoutPayload({ ...validWorkout, name: "" }).ok).toBe(false);
+  });
+
+  it("rejects invalid sport", () => {
+    expect(validateWorkoutPayload({ ...validWorkout, sport: "golf" }).ok).toBe(false);
+  });
+
+  it("rejects empty steps", () => {
+    expect(validateWorkoutPayload({ ...validWorkout, steps: [] }).ok).toBe(false);
+  });
+
+  it("rejects invalid step type", () => {
+    const w = { ...validWorkout, steps: [{ type: "bad", duration: { type: "time", seconds: 60 }, target: { type: "none" } }] };
+    expect(validateWorkoutPayload(w).ok).toBe(false);
+  });
+
+  it("rejects invalid duration type", () => {
+    const w = { ...validWorkout, steps: [{ type: "warmup", duration: { type: "bad" }, target: { type: "none" } }] };
+    expect(validateWorkoutPayload(w).ok).toBe(false);
+  });
+
+  it("rejects time duration with non-positive seconds", () => {
+    const w = { ...validWorkout, steps: [{ type: "warmup", duration: { type: "time", seconds: 0 }, target: { type: "none" } }] };
+    expect(validateWorkoutPayload(w).ok).toBe(false);
+  });
+
+  it("rejects distance duration with non-positive meters", () => {
+    const w = { ...validWorkout, steps: [{ type: "warmup", duration: { type: "distance", meters: -1 }, target: { type: "none" } }] };
+    expect(validateWorkoutPayload(w).ok).toBe(false);
+  });
+
+  it("rejects invalid target type", () => {
+    const w = { ...validWorkout, steps: [{ type: "warmup", duration: { type: "time", seconds: 60 }, target: { type: "bad" } }] };
+    expect(validateWorkoutPayload(w).ok).toBe(false);
+  });
+
+  it("rejects invalid pace format", () => {
+    const w = { ...validWorkout, steps: [{
+      type: "interval", duration: { type: "time", seconds: 60 },
+      target: { type: "pace", minPerKm: "bad", maxPerKm: "5:00" },
+    }] };
+    expect(validateWorkoutPayload(w).ok).toBe(false);
+  });
+
+  it("rejects HR zone out of range", () => {
+    const w = { ...validWorkout, steps: [{
+      type: "interval", duration: { type: "time", seconds: 60 },
+      target: { type: "heartRateZone", zone: 6 },
+    }] };
+    expect(validateWorkoutPayload(w).ok).toBe(false);
+  });
+
+  it("accepts valid repeat group", () => {
+    const w = { ...validWorkout, steps: [
+      { type: "repeat", iterations: 3, steps: [
+        { type: "interval", duration: { type: "time", seconds: 60 }, target: { type: "none" } },
+        { type: "recovery", duration: { type: "time", seconds: 30 }, target: { type: "none" } },
+      ]},
+    ]};
+    expect(validateWorkoutPayload(w).ok).toBe(true);
+  });
+
+  it("rejects repeat with zero iterations", () => {
+    const w = { ...validWorkout, steps: [
+      { type: "repeat", iterations: 0, steps: [
+        { type: "interval", duration: { type: "time", seconds: 60 }, target: { type: "none" } },
+      ]},
+    ]};
+    expect(validateWorkoutPayload(w).ok).toBe(false);
+  });
+
+  it("rejects repeat with empty steps", () => {
+    const w = { ...validWorkout, steps: [
+      { type: "repeat", iterations: 3, steps: [] },
+    ]};
+    expect(validateWorkoutPayload(w).ok).toBe(false);
+  });
+
+  it("rejects nested repeats", () => {
+    const w = { ...validWorkout, steps: [
+      { type: "repeat", iterations: 2, steps: [
+        { type: "repeat", iterations: 2, steps: [
+          { type: "interval", duration: { type: "time", seconds: 60 }, target: { type: "none" } },
+        ]},
+      ]},
+    ]};
+    expect(validateWorkoutPayload(w).ok).toBe(false);
+  });
+
+  it("includes step number in error message", () => {
+    const w = { ...validWorkout, steps: [
+      { type: "warmup", duration: { type: "time", seconds: 300 }, target: { type: "none" } },
+      { type: "interval", duration: { type: "bad" }, target: { type: "none" } },
+    ]};
+    const result = validateWorkoutPayload(w);
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/Step 2/);
+  });
+});
+
+// ============================================================
+// POST /garmin/workout/create TESTS
+// ============================================================
+
+describe("POST /garmin/workout/create", () => {
+  const VALID_WORKOUT_BODY = {
+    username: "u",
+    tokenJson: FAKE_TOKEN,
+    workout: {
+      name: "Test Intervals",
+      sport: "running",
+      steps: [
+        { type: "warmup", duration: { type: "time", seconds: 600 }, target: { type: "none" } },
+        {
+          type: "repeat", iterations: 4,
+          steps: [
+            { type: "interval", duration: { type: "distance", meters: 800 }, target: { type: "pace", minPerKm: "5:00", maxPerKm: "4:30" } },
+            { type: "recovery", duration: { type: "time", seconds: 90 }, target: { type: "none" } },
+          ],
+        },
+        { type: "cooldown", duration: { type: "lapButton" }, target: { type: "none" } },
+      ],
+    },
+  };
+
+  // --- Success ---
+
+  it("creates a workout and returns workoutId", async () => {
+    const res = await request(app)
+      .post("/garmin/workout/create")
+      .set(auth())
+      .send(VALID_WORKOUT_BODY);
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.workoutId).toBe(99999);
+    expect(res.body.workoutName).toBe("Test Workout");
+    expect(res.body.tokenJson).toEqual(REFRESHED_TOKEN);
+    expect(mockCreateWorkout).toHaveBeenCalledTimes(1);
+    expect(mockScheduleWorkout).not.toHaveBeenCalled();
+  });
+
+  it("passes correct Garmin JSON to createWorkout", async () => {
+    await request(app)
+      .post("/garmin/workout/create")
+      .set(auth())
+      .send(VALID_WORKOUT_BODY);
+    const garminPayload = mockCreateWorkout.mock.calls[0][0];
+    expect(garminPayload.workoutName).toBe("Test Intervals");
+    expect(garminPayload.sportType.sportTypeKey).toBe("running");
+    expect(garminPayload.workoutSegments).toHaveLength(1);
+    const steps = garminPayload.workoutSegments[0].workoutSteps;
+    expect(steps).toHaveLength(3);
+    expect(steps[0].type).toBe("ExecutableStepDTO");
+    expect(steps[1].type).toBe("RepeatGroupDTO");
+    expect(steps[1].numberOfIterations).toBe(4);
+    expect(steps[2].type).toBe("ExecutableStepDTO");
+  });
+
+  it("creates and schedules when scheduleDate provided", async () => {
+    const res = await request(app)
+      .post("/garmin/workout/create")
+      .set(auth())
+      .send({ ...VALID_WORKOUT_BODY, scheduleDate: "2026-03-15" });
+    expect(res.status).toBe(200);
+    expect(res.body.scheduled).toBe(true);
+    expect(res.body.scheduleDate).toBe("2026-03-15");
+    expect(mockScheduleWorkout).toHaveBeenCalledTimes(1);
+    expect(mockScheduleWorkout).toHaveBeenCalledWith(
+      { workoutId: "99999" },
+      "2026-03-15"
+    );
+  });
+
+  it("creates workout with flat steps (no repeats)", async () => {
+    const body = {
+      username: "u",
+      tokenJson: FAKE_TOKEN,
+      workout: {
+        name: "Easy Run",
+        sport: "running",
+        steps: [
+          { type: "warmup", duration: { type: "time", seconds: 300 }, target: { type: "none" } },
+          { type: "interval", duration: { type: "time", seconds: 2400 }, target: { type: "heartRateZone", zone: 2 } },
+          { type: "cooldown", duration: { type: "lapButton" }, target: { type: "none" } },
+        ],
+      },
+    };
+    const res = await request(app)
+      .post("/garmin/workout/create")
+      .set(auth())
+      .send(body);
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+  });
+
+  it("creates cycling workout with power targets", async () => {
+    const body = {
+      username: "u",
+      tokenJson: FAKE_TOKEN,
+      workout: {
+        name: "Sweet Spot",
+        sport: "cycling",
+        steps: [
+          { type: "warmup", duration: { type: "time", seconds: 600 }, target: { type: "powerZone", zone: 2 } },
+          { type: "interval", duration: { type: "time", seconds: 1200 }, target: { type: "power", min: 230, max: 270 } },
+          { type: "cooldown", duration: { type: "time", seconds: 300 }, target: { type: "none" } },
+        ],
+      },
+    };
+    const res = await request(app)
+      .post("/garmin/workout/create")
+      .set(auth())
+      .send(body);
+    expect(res.status).toBe(200);
+    const garminPayload = mockCreateWorkout.mock.calls[0][0];
+    expect(garminPayload.sportType.sportTypeKey).toBe("cycling");
+  });
+
+  // --- Validation errors ---
+
+  it("returns 400 for missing workout", async () => {
+    const res = await request(app)
+      .post("/garmin/workout/create")
+      .set(auth())
+      .send({ username: "u", tokenJson: FAKE_TOKEN });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/Missing workout/);
+  });
+
+  it("returns 400 for invalid sport", async () => {
+    const res = await request(app)
+      .post("/garmin/workout/create")
+      .set(auth())
+      .send({ username: "u", tokenJson: FAKE_TOKEN, workout: { name: "X", sport: "golf", steps: [{ type: "warmup", duration: { type: "time", seconds: 60 }, target: { type: "none" } }] } });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/sport/i);
+  });
+
+  it("returns 400 for invalid scheduleDate format", async () => {
+    const res = await request(app)
+      .post("/garmin/workout/create")
+      .set(auth())
+      .send({ ...VALID_WORKOUT_BODY, scheduleDate: "March 15" });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/scheduleDate/);
+  });
+
+  // --- Auth ---
+
+  it("requires API key", async () => {
+    const res = await request(app)
+      .post("/garmin/workout/create")
+      .send(VALID_WORKOUT_BODY);
+    expect(res.status).toBe(401);
+  });
+
+  it("returns 400 when missing username", async () => {
+    const res = await request(app)
+      .post("/garmin/workout/create")
+      .set(auth())
+      .send({ tokenJson: FAKE_TOKEN, workout: VALID_WORKOUT_BODY.workout });
+    expect(res.status).toBe(400);
+  });
+
+  it("returns 400 when missing tokenJson", async () => {
+    const res = await request(app)
+      .post("/garmin/workout/create")
+      .set(auth())
+      .send({ username: "u", workout: VALID_WORKOUT_BODY.workout });
+    expect(res.status).toBe(400);
+  });
+
+  // --- Error handling ---
+
+  it("returns 401 on token errors", async () => {
+    mockCreateWorkout.mockRejectedValue(new Error("401 Unauthorized"));
+    const res = await request(app)
+      .post("/garmin/workout/create")
+      .set(auth())
+      .send(VALID_WORKOUT_BODY);
+    expect(res.status).toBe(401);
+  });
+
+  it("returns 504 on timeout", async () => {
+    mockCreateWorkout.mockRejectedValue(new GarminTimeoutError(10000));
+    const res = await request(app)
+      .post("/garmin/workout/create")
+      .set(auth())
+      .send(VALID_WORKOUT_BODY);
+    expect(res.status).toBe(504);
+    expect(res.body.error).toMatch(/timed out/i);
+  });
+
+  it("returns 500 for non-token Garmin errors", async () => {
+    mockCreateWorkout.mockRejectedValue(new Error("Server error"));
+    const res = await request(app)
+      .post("/garmin/workout/create")
+      .set(auth())
+      .send(VALID_WORKOUT_BODY);
+    expect(res.status).toBe(500);
   });
 });

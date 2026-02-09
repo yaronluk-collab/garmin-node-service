@@ -32,6 +32,10 @@ vi.mock("@flow-js/garmin-connect", () => {
 // Now import the server (uses the mocked GarminConnect)
 const {
   app,
+  GarminTimeoutError,
+  withTimeout,
+  GARMIN_LOGIN_TIMEOUT_MS,
+  GARMIN_API_TIMEOUT_MS,
   parseActivityIdFromBody,
   canAttemptPasswordLogin,
   markPasswordLoginAttempt,
@@ -1900,5 +1904,100 @@ describe("POST /garmin/workout", () => {
       .post("/garmin/workout")
       .send({ username: "u", tokenJson: FAKE_TOKEN, activityId: 99 });
     expect(res.status).toBe(401);
+  });
+});
+
+// ============================================================
+// TIMEOUT TESTS
+// ============================================================
+
+describe("withTimeout", () => {
+  it("resolves when promise completes before timeout", async () => {
+    const result = await withTimeout(Promise.resolve("ok"), 1000);
+    expect(result).toBe("ok");
+  });
+
+  it("rejects with GarminTimeoutError when promise exceeds timeout", async () => {
+    const slow = new Promise((resolve) => setTimeout(resolve, 5000));
+    await expect(withTimeout(slow, 50)).rejects.toThrow(GarminTimeoutError);
+  });
+
+  it("propagates the original rejection if it happens before timeout", async () => {
+    const failing = Promise.reject(new Error("original error"));
+    await expect(withTimeout(failing, 1000)).rejects.toThrow("original error");
+  });
+});
+
+describe("Timeout handling (504 responses)", () => {
+  it("POST /garmin/profile returns 504 on timeout", async () => {
+    mockGetUserProfile.mockRejectedValue(new GarminTimeoutError(GARMIN_API_TIMEOUT_MS));
+    const res = await request(app)
+      .post("/garmin/profile")
+      .set(auth())
+      .send({ username: "u", tokenJson: FAKE_TOKEN });
+    expect(res.status).toBe(504);
+    expect(res.body.error).toMatch(/timed out/i);
+  });
+
+  it("POST /garmin/activities returns 504 on timeout", async () => {
+    mockGetActivities.mockRejectedValue(new GarminTimeoutError(GARMIN_API_TIMEOUT_MS));
+    const res = await request(app)
+      .post("/garmin/activities")
+      .set(auth())
+      .send({ username: "u", tokenJson: FAKE_TOKEN });
+    expect(res.status).toBe(504);
+    expect(res.body.error).toMatch(/timed out/i);
+  });
+
+  it("POST /garmin/activity returns 504 on timeout", async () => {
+    mockGetActivity.mockRejectedValue(new GarminTimeoutError(GARMIN_API_TIMEOUT_MS));
+    const res = await request(app)
+      .post("/garmin/activity")
+      .set(auth())
+      .send({ username: "u", tokenJson: FAKE_TOKEN, activityId: 99 });
+    expect(res.status).toBe(504);
+    expect(res.body.error).toMatch(/timed out/i);
+  });
+
+  it("POST /garmin/splits returns 504 on timeout", async () => {
+    mockGet.mockRejectedValue(new GarminTimeoutError(GARMIN_API_TIMEOUT_MS));
+    const res = await request(app)
+      .post("/garmin/splits")
+      .set(auth())
+      .send({ username: "u", tokenJson: FAKE_TOKEN, activityId: 99 });
+    expect(res.status).toBe(504);
+    expect(res.body.error).toMatch(/timed out/i);
+  });
+
+  it("POST /garmin/workout returns 504 on timeout", async () => {
+    mockGetActivity.mockRejectedValue(new GarminTimeoutError(GARMIN_API_TIMEOUT_MS));
+    const res = await request(app)
+      .post("/garmin/workout")
+      .set(auth())
+      .send({ username: "u", tokenJson: FAKE_TOKEN, activityId: 99 });
+    expect(res.status).toBe(504);
+    expect(res.body.error).toMatch(/timed out/i);
+  });
+
+  it("POST /garmin/connect returns 504 when login() times out", async () => {
+    mockLogin.mockRejectedValue(new GarminTimeoutError(GARMIN_LOGIN_TIMEOUT_MS));
+    const res = await request(app)
+      .post("/garmin/connect")
+      .set(auth())
+      .send({ username: "u", password: "p" });
+    expect(res.status).toBe(504);
+    expect(res.body.error).toMatch(/timed out/i);
+  });
+
+  it("POST /garmin/connect returns 504 (not fallback to login) when token validation times out", async () => {
+    mockGetUserProfile.mockRejectedValue(new GarminTimeoutError(GARMIN_API_TIMEOUT_MS));
+    const res = await request(app)
+      .post("/garmin/connect")
+      .set(auth())
+      .send({ username: "u", password: "p", tokenJson: FAKE_TOKEN });
+    expect(res.status).toBe(504);
+    expect(res.body.error).toMatch(/timed out/i);
+    // Should NOT have attempted password login
+    expect(mockLogin).not.toHaveBeenCalled();
   });
 });

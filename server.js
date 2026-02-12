@@ -1059,6 +1059,17 @@ app.post("/garmin/profile", requireApiKey, (req, res) =>
 );
 
 // --------------------
+// Garmin: USER SETTINGS (TOKEN-ONLY)
+// Body: { username/email, tokenJson }
+// Returns raw getUserSettings() response for inspecting available biometric data
+// --------------------
+app.post("/garmin/user-settings", requireApiKey, (req, res) =>
+  withGarminToken(req, res, async (client) => ({
+    userSettings: await withTimeout(client.getUserSettings(), GARMIN_API_TIMEOUT_MS),
+  }))
+);
+
+// --------------------
 // Garmin: ACTIVITIES (TOKEN-ONLY)
 // Body: { username/email, tokenJson, offset?, limit? }
 // --------------------

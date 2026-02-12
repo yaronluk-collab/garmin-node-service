@@ -303,6 +303,41 @@ const SPLIT_PROFILE_FIELDS = {
 const VALID_PROFILES = new Set(["summary", "coaching", "full"]);
 
 // --------------------
+// Athlete profile field profiles
+// --------------------
+const ATHLETE_SUMMARY_FIELDS = [
+  "displayName",
+  "gender",
+  "age",
+  "weightKg",
+  "heightCm",
+];
+
+const ATHLETE_COACHING_FIELDS = [
+  "displayName",
+  "gender",
+  "age",
+  "birthDate",
+  "weightKg",
+  "heightCm",
+  "vo2MaxRunning",
+  "vo2MaxCycling",
+  "lactateThresholdHeartRate",
+  "lactateThresholdSpeed",
+  "activityLevel",
+  "availableTrainingDays",
+  "preferredLongTrainingDays",
+  "sleepTime",
+  "wakeTime",
+  "measurementSystem",
+];
+
+const ATHLETE_PROFILE_FIELDS = {
+  summary: ATHLETE_SUMMARY_FIELDS,
+  coaching: ATHLETE_COACHING_FIELDS,
+};
+
+// --------------------
 // Workout semantic group field lists
 // --------------------
 const WORKOUT_IDENTITY_FIELDS = [
@@ -452,6 +487,50 @@ function pickFields(obj, fields) {
     }
   }
   return result;
+}
+
+function secsToHHMM(secs) {
+  if (!Number.isFinite(secs) || secs < 0) return null;
+  const h = Math.floor(secs / 3600) % 24;
+  const m = Math.floor((secs % 3600) / 60);
+  return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}`;
+}
+
+function computeAge(birthDateStr) {
+  if (!birthDateStr) return null;
+  const birth = new Date(birthDateStr);
+  if (isNaN(birth.getTime())) return null;
+  const today = new Date();
+  let age = today.getFullYear() - birth.getFullYear();
+  const monthDiff = today.getMonth() - birth.getMonth();
+  if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < birth.getDate())) {
+    age--;
+  }
+  return age;
+}
+
+function buildAthleteProfile(userSettings, socialProfile) {
+  const ud = userSettings?.userData || {};
+  const us = userSettings?.userSleep || {};
+
+  return {
+    displayName: socialProfile?.displayName || null,
+    gender: ud.gender || null,
+    age: computeAge(ud.birthDate),
+    birthDate: ud.birthDate || null,
+    weightKg: Number.isFinite(ud.weight) ? Math.round(ud.weight / 100) / 10 : null,
+    heightCm: ud.height || null,
+    vo2MaxRunning: ud.vo2MaxRunning ?? null,
+    vo2MaxCycling: ud.vo2MaxCycling ?? null,
+    lactateThresholdHeartRate: ud.lactateThresholdHeartRate ?? null,
+    lactateThresholdSpeed: ud.lactateThresholdSpeed ?? null,
+    activityLevel: ud.activityLevel ?? null,
+    availableTrainingDays: ud.availableTrainingDays || null,
+    preferredLongTrainingDays: ud.preferredLongTrainingDays || null,
+    sleepTime: secsToHHMM(us.sleepTime),
+    wakeTime: secsToHHMM(us.wakeTime),
+    measurementSystem: ud.measurementSystem || null,
+  };
 }
 
 // getActivity() returns IActivityDetails with nested DTOs (summaryDTO, metadataDTO,
@@ -1070,6 +1149,34 @@ app.post("/garmin/user-settings", requireApiKey, (req, res) =>
 );
 
 // --------------------
+// Garmin: ATHLETE PROFILE (TOKEN-ONLY)
+// Body: { username/email, tokenJson, profile? }
+// profile: "summary" | "coaching" | "full" (default: "full")
+// --------------------
+app.post("/garmin/athlete-profile", requireApiKey, (req, res) => {
+  const profile = req.body?.profile || "full";
+  if (!VALID_PROFILES.has(profile)) {
+    return res.status(400).json({
+      ok: false,
+      error: `Invalid profile "${profile}". Must be one of: summary, coaching, full`,
+    });
+  }
+
+  return withGarminToken(req, res, async (client) => {
+    const [settings, socialProfile] = await Promise.all([
+      withTimeout(client.getUserSettings(), GARMIN_API_TIMEOUT_MS),
+      withTimeout(client.getUserProfile(), GARMIN_API_TIMEOUT_MS),
+    ]);
+
+    const full = buildAthleteProfile(settings, socialProfile);
+    const fields = ATHLETE_PROFILE_FIELDS[profile];
+    const athleteProfile = fields ? pickFields(full, fields) : full;
+
+    return { athleteProfile, profile };
+  });
+});
+
+// --------------------
 // Garmin: ACTIVITIES (TOKEN-ONLY)
 // Body: { username/email, tokenJson, offset?, limit? }
 // --------------------
@@ -1323,6 +1430,12 @@ export {
   buildGarminWorkout,
   validateWorkoutPayload,
   validateWorkoutStep,
+  buildAthleteProfile,
+  secsToHHMM,
+  computeAge,
+  ATHLETE_SUMMARY_FIELDS,
+  ATHLETE_COACHING_FIELDS,
+  ATHLETE_PROFILE_FIELDS,
 };
 
 if (process.argv[1] && import.meta.url.endsWith(process.argv[1].replace(/^.*[\\/]/, ""))) {

@@ -11,6 +11,7 @@ const mockGetActivity = vi.fn();
 const mockGet = vi.fn();
 const mockExportToken = vi.fn();
 const mockLoadToken = vi.fn();
+const mockGetUserSettings = vi.fn();
 const mockCreateWorkout = vi.fn();
 const mockScheduleWorkout = vi.fn();
 
@@ -24,6 +25,7 @@ vi.mock("@flow-js/garmin-connect", () => {
     getUserProfile(...args) { return mockGetUserProfile(...args); }
     getActivities(...args) { return mockGetActivities(...args); }
     getActivity(...args) { return mockGetActivity(...args); }
+    getUserSettings(...args) { return mockGetUserSettings(...args); }
     get(...args) { return mockGet(...args); }
     exportToken(...args) { return mockExportToken(...args); }
     loadToken(...args) { return mockLoadToken(...args); }
@@ -73,6 +75,12 @@ const {
   buildGarminRepeatGroup,
   buildGarminWorkout,
   validateWorkoutPayload,
+  buildAthleteProfile,
+  secsToHHMM,
+  computeAge,
+  ATHLETE_SUMMARY_FIELDS,
+  ATHLETE_COACHING_FIELDS,
+  ATHLETE_PROFILE_FIELDS,
 } = await import("./server.js");
 
 // ---------------------
@@ -91,6 +99,24 @@ beforeEach(() => {
   mockExportToken.mockResolvedValue(REFRESHED_TOKEN);
   mockLoadToken.mockResolvedValue(undefined);
   mockGetUserProfile.mockResolvedValue({ displayName: "TestUser" });
+  mockGetUserSettings.mockResolvedValue({
+    id: 95492098,
+    userData: {
+      gender: "MALE",
+      weight: 79980,
+      height: 176,
+      birthDate: "1981-02-02",
+      vo2MaxRunning: 50,
+      vo2MaxCycling: 51,
+      lactateThresholdHeartRate: 158,
+      lactateThresholdSpeed: 0.36388787,
+      activityLevel: 8,
+      availableTrainingDays: ["MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY", "SUNDAY"],
+      preferredLongTrainingDays: ["FRIDAY"],
+      measurementSystem: "metric",
+    },
+    userSleep: { sleepTime: 79200, wakeTime: 21600 },
+  });
   mockGetActivities.mockResolvedValue([{ activityId: 1 }, { activityId: 2 }]);
   // Mock returns nested IActivityDetails structure (as real Garmin API does)
   mockGetActivity.mockResolvedValue({
@@ -521,6 +547,268 @@ describe("POST /garmin/profile", () => {
       .send({ username: "u", tokenJson: FAKE_TOKEN });
     expect(res.status).toBe(500);
     expect(res.body.error).toBe("Garmin request failed");
+  });
+});
+
+// ============================================================
+// POST /garmin/athlete-profile TESTS
+// ============================================================
+
+describe("POST /garmin/athlete-profile", () => {
+  it("returns full athlete profile by default", async () => {
+    const res = await request(app)
+      .post("/garmin/athlete-profile")
+      .set(auth())
+      .send({ username: "u", tokenJson: FAKE_TOKEN });
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.profile).toBe("full");
+    const ap = res.body.athleteProfile;
+    expect(ap.displayName).toBe("TestUser");
+    expect(ap.gender).toBe("MALE");
+    expect(ap.birthDate).toBe("1981-02-02");
+    expect(ap.weightKg).toBe(80);
+    expect(ap.heightCm).toBe(176);
+    expect(ap.vo2MaxRunning).toBe(50);
+    expect(ap.vo2MaxCycling).toBe(51);
+    expect(ap.lactateThresholdHeartRate).toBe(158);
+    expect(ap.lactateThresholdSpeed).toBe(0.36388787);
+    expect(ap.activityLevel).toBe(8);
+    expect(ap.availableTrainingDays).toEqual(["MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY", "SUNDAY"]);
+    expect(ap.preferredLongTrainingDays).toEqual(["FRIDAY"]);
+    expect(ap.sleepTime).toBe("22:00");
+    expect(ap.wakeTime).toBe("06:00");
+    expect(ap.measurementSystem).toBe("metric");
+    expect(typeof ap.age).toBe("number");
+    expect(ap.age).toBeGreaterThan(0);
+  });
+
+  it("returns summary fields only when profile=summary", async () => {
+    const res = await request(app)
+      .post("/garmin/athlete-profile")
+      .set(auth())
+      .send({ username: "u", tokenJson: FAKE_TOKEN, profile: "summary" });
+    expect(res.status).toBe(200);
+    expect(res.body.profile).toBe("summary");
+    const ap = res.body.athleteProfile;
+    expect(Object.keys(ap).sort()).toEqual([...ATHLETE_SUMMARY_FIELDS].sort());
+    expect(ap.displayName).toBe("TestUser");
+    expect(ap.gender).toBe("MALE");
+    expect(ap.weightKg).toBe(80);
+    expect(ap.heightCm).toBe(176);
+    // coaching-only fields should be absent
+    expect(ap.vo2MaxRunning).toBeUndefined();
+    expect(ap.birthDate).toBeUndefined();
+  });
+
+  it("returns coaching fields only when profile=coaching", async () => {
+    const res = await request(app)
+      .post("/garmin/athlete-profile")
+      .set(auth())
+      .send({ username: "u", tokenJson: FAKE_TOKEN, profile: "coaching" });
+    expect(res.status).toBe(200);
+    expect(res.body.profile).toBe("coaching");
+    const ap = res.body.athleteProfile;
+    expect(Object.keys(ap).sort()).toEqual([...ATHLETE_COACHING_FIELDS].sort());
+    expect(ap.vo2MaxRunning).toBe(50);
+    expect(ap.sleepTime).toBe("22:00");
+  });
+
+  it("rejects invalid profile value", async () => {
+    const res = await request(app)
+      .post("/garmin/athlete-profile")
+      .set(auth())
+      .send({ username: "u", tokenJson: FAKE_TOKEN, profile: "bad" });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/Invalid profile/);
+  });
+
+  it("calls both getUserSettings and getUserProfile", async () => {
+    await request(app)
+      .post("/garmin/athlete-profile")
+      .set(auth())
+      .send({ username: "u", tokenJson: FAKE_TOKEN });
+    expect(mockGetUserSettings).toHaveBeenCalledTimes(1);
+    expect(mockGetUserProfile).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns refreshed tokens", async () => {
+    const res = await request(app)
+      .post("/garmin/athlete-profile")
+      .set(auth())
+      .send({ username: "u", tokenJson: FAKE_TOKEN });
+    expect(res.body.tokenJson).toEqual(REFRESHED_TOKEN);
+  });
+
+  it("returns 400 when username is missing", async () => {
+    const res = await request(app)
+      .post("/garmin/athlete-profile")
+      .set(auth())
+      .send({ tokenJson: FAKE_TOKEN });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/Missing username/);
+  });
+
+  it("returns 400 when tokenJson is missing", async () => {
+    const res = await request(app)
+      .post("/garmin/athlete-profile")
+      .set(auth())
+      .send({ username: "u" });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/Missing tokenJson/);
+  });
+
+  it("returns 401 for expired token", async () => {
+    mockGetUserSettings.mockRejectedValue(new Error("Token expired"));
+    const res = await request(app)
+      .post("/garmin/athlete-profile")
+      .set(auth())
+      .send({ username: "u", tokenJson: FAKE_TOKEN });
+    expect(res.status).toBe(401);
+  });
+
+  it("returns 504 on timeout", async () => {
+    mockGetUserSettings.mockRejectedValue(new GarminTimeoutError(10000));
+    const res = await request(app)
+      .post("/garmin/athlete-profile")
+      .set(auth())
+      .send({ username: "u", tokenJson: FAKE_TOKEN });
+    expect(res.status).toBe(504);
+  });
+
+  it("returns 500 for non-token Garmin errors", async () => {
+    mockGetUserSettings.mockRejectedValue(new Error("Network timeout"));
+    const res = await request(app)
+      .post("/garmin/athlete-profile")
+      .set(auth())
+      .send({ username: "u", tokenJson: FAKE_TOKEN });
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBe("Garmin request failed");
+  });
+});
+
+// ============================================================
+// buildAthleteProfile UNIT TESTS
+// ============================================================
+
+describe("buildAthleteProfile", () => {
+  const defaultSettings = {
+    userData: {
+      gender: "MALE",
+      weight: 79980,
+      height: 176,
+      birthDate: "1981-02-02",
+      vo2MaxRunning: 50,
+      vo2MaxCycling: 51,
+      lactateThresholdHeartRate: 158,
+      lactateThresholdSpeed: 0.36388787,
+      activityLevel: 8,
+      availableTrainingDays: ["MONDAY"],
+      preferredLongTrainingDays: ["FRIDAY"],
+      measurementSystem: "metric",
+    },
+    userSleep: { sleepTime: 79200, wakeTime: 21600 },
+  };
+  const defaultSocial = { displayName: "TestUser" };
+
+  it("flattens settings + socialProfile correctly", () => {
+    const result = buildAthleteProfile(defaultSettings, defaultSocial);
+    expect(result.displayName).toBe("TestUser");
+    expect(result.gender).toBe("MALE");
+    expect(result.heightCm).toBe(176);
+    expect(result.vo2MaxRunning).toBe(50);
+  });
+
+  it("computes age from birthDate", () => {
+    const result = buildAthleteProfile(defaultSettings, defaultSocial);
+    // Born 1981-02-02, should be 44 or 45 depending on today
+    expect(result.age).toBeGreaterThanOrEqual(44);
+    expect(result.age).toBeLessThanOrEqual(45);
+  });
+
+  it("handles birthday boundary (not yet had birthday this year)", () => {
+    const today = new Date();
+    // Set birthDate to tomorrow's month/day in a past year
+    const tomorrow = new Date(today);
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    const futureMonth = String(tomorrow.getMonth() + 1).padStart(2, "0");
+    const futureDay = String(tomorrow.getDate()).padStart(2, "0");
+    const settings = {
+      ...defaultSettings,
+      userData: { ...defaultSettings.userData, birthDate: `1990-${futureMonth}-${futureDay}` },
+    };
+    const result = buildAthleteProfile(settings, defaultSocial);
+    const expectedAge = today.getFullYear() - 1990 - 1;
+    expect(result.age).toBe(expectedAge);
+  });
+
+  it("converts weight from grams to kg (1 decimal)", () => {
+    const result = buildAthleteProfile(defaultSettings, defaultSocial);
+    // 79980g → 80.0 kg (Math.round(79980/100)/10 = 800/10 = 80)
+    expect(result.weightKg).toBe(80);
+
+    const settings2 = {
+      ...defaultSettings,
+      userData: { ...defaultSettings.userData, weight: 72350 },
+    };
+    const result2 = buildAthleteProfile(settings2, defaultSocial);
+    // 72350g → Math.round(72350/100)/10 = Math.round(723.5)/10 = 724/10 = 72.4
+    expect(result2.weightKg).toBe(72.4);
+  });
+
+  it("converts sleep seconds to HH:MM strings", () => {
+    const result = buildAthleteProfile(defaultSettings, defaultSocial);
+    expect(result.sleepTime).toBe("22:00");
+    expect(result.wakeTime).toBe("06:00");
+  });
+
+  it("handles missing/null userData gracefully", () => {
+    const result = buildAthleteProfile({}, { displayName: "X" });
+    expect(result.displayName).toBe("X");
+    expect(result.gender).toBeNull();
+    expect(result.age).toBeNull();
+    expect(result.weightKg).toBeNull();
+    expect(result.heightCm).toBeNull();
+    expect(result.sleepTime).toBeNull();
+    expect(result.wakeTime).toBeNull();
+  });
+
+  it("handles null userSettings gracefully", () => {
+    const result = buildAthleteProfile(null, null);
+    expect(result.displayName).toBeNull();
+    expect(result.gender).toBeNull();
+    expect(result.age).toBeNull();
+  });
+});
+
+describe("secsToHHMM", () => {
+  it("converts seconds from midnight to HH:MM", () => {
+    expect(secsToHHMM(0)).toBe("00:00");
+    expect(secsToHHMM(3600)).toBe("01:00");
+    expect(secsToHHMM(79200)).toBe("22:00");
+    expect(secsToHHMM(21600)).toBe("06:00");
+    expect(secsToHHMM(45060)).toBe("12:31");
+  });
+
+  it("returns null for invalid input", () => {
+    expect(secsToHHMM(null)).toBeNull();
+    expect(secsToHHMM(undefined)).toBeNull();
+    expect(secsToHHMM(-1)).toBeNull();
+    expect(secsToHHMM(NaN)).toBeNull();
+  });
+});
+
+describe("computeAge", () => {
+  it("computes age from a date string", () => {
+    const age = computeAge("1981-02-02");
+    expect(age).toBeGreaterThanOrEqual(44);
+    expect(age).toBeLessThanOrEqual(45);
+  });
+
+  it("returns null for null/undefined/invalid input", () => {
+    expect(computeAge(null)).toBeNull();
+    expect(computeAge(undefined)).toBeNull();
+    expect(computeAge("not-a-date")).toBeNull();
   });
 });
 
